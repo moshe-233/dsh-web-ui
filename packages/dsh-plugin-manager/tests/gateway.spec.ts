@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { detectOfficialChannels, dshSpawnCommand, findDshBinary } from '../src/host/gateway.ts'
+import { detectOfficialChannels, dshSpawnCommand, findDshBinary, unsafeSpecReason, windowsCmdShimArgs } from '../src/host/gateway.ts'
 import { sourceKindOf } from '../src/host/state.ts'
 
 describe('findDshBinary', () => {
@@ -11,6 +11,36 @@ describe('findDshBinary', () => {
 
   it('finds a dsh.cmd on Windows', () => {
     expect(findDshBinary({ PATH: 'C:\\tools' }, 'win32', exists(['C:\\tools\\dsh.cmd']))).toBe('C:\\tools\\dsh.cmd')
+  })
+
+  it('falls back to a local wrapper installation outside PATH on Windows', () => {
+    const binary = 'D:\\APP\\DSH\\node_modules\\.bin\\dsh.cmd'
+    expect(findDshBinary(
+      { PATH: 'C:\\Windows\\System32' },
+      'win32',
+      exists([binary]),
+      'D:\\APP\\DSH\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js',
+    )).toBe(binary)
+  })
+
+  it('keeps PATH precedence over the host installation fallback', () => {
+    const pathBinary = 'C:\\tools\\dsh.cmd'
+    const localBinary = 'D:\\APP\\DSH\\node_modules\\.bin\\dsh.cmd'
+    expect(findDshBinary(
+      { PATH: 'C:\\tools' },
+      'win32',
+      exists([pathBinary, localBinary]),
+      'D:\\APP\\DSH\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js',
+    )).toBe(pathBinary)
+  })
+
+  it('finds the nearest POSIX project shim from the host entry', () => {
+    expect(findDshBinary(
+      { PATH: '/nothing' },
+      'linux',
+      exists(['/opt/dsh/node_modules/.bin/dsh']),
+      '/opt/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    )).toBe('/opt/dsh/node_modules/.bin/dsh')
   })
 
   it('falls back to the darwin homebrew location', () => {
@@ -40,17 +70,16 @@ describe('dshSpawnCommand', () => {
 
   it('resolves the wrapper into node + bin.js on Windows, preferring a local node', () => {
     const binary = 'C:\\Program Files\\nodejs\\dsh.cmd'
-    expect(dshSpawnCommand(binary, 'win32', () => true)).toEqual({
+    expect(dshSpawnCommand(binary, 'win32', () => true, () => true)).toEqual({
       command: 'C:\\Program Files\\nodejs\\node.exe',
       argsPrefix: ['C:\\Program Files\\nodejs\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'],
     })
   })
 
-  it('keeps the full bin.js path as one argument (spaces survive)', () => {
+  it('falls back to the .cmd shim when no npm bin.js exists', () => {
     const { command, argsPrefix } = dshSpawnCommand('C:\\Program Files\\nodejs\\dsh.cmd', 'win32', () => false)
-    expect(argsPrefix).toHaveLength(1)
-    expect(argsPrefix[0]).toBe('C:\\Program Files\\nodejs\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js')
-    expect(command).toBe(process.execPath)
+    expect(argsPrefix).toEqual([])
+    expect(command).toBe('C:\\Program Files\\nodejs\\dsh.cmd')
   })
 
   it('resolves the npx layout when the package sits one level above the shim (issue #683)', () => {
@@ -65,6 +94,22 @@ describe('dshSpawnCommand', () => {
     const binary = 'C:\\tools\\nodejs\\dsh.cmd'
     const { argsPrefix } = dshSpawnCommand(binary, 'win32', () => false, () => true)
     expect(argsPrefix[0]).toBe('C:\\tools\\nodejs\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js')
+  })
+})
+
+describe('desktop .cmd execution', () => {
+  it('keeps a spaced shim path and every argument inside the cmd /s envelope', () => {
+    expect(windowsCmdShimArgs('C:\\Users\\u\\AppData\\Roaming\\DSH Desktop\\host-commands\\desktop\\bin\\dsh.cmd', [
+      '--profile', 'desktop', 'plugin', 'add', '@scope/pkg@1.2.3',
+    ])).toEqual([
+      '/d', '/s', '/c',
+      '""C:\\Users\\u\\AppData\\Roaming\\DSH Desktop\\host-commands\\desktop\\bin\\dsh.cmd" "--profile" "desktop" "plugin" "add" "@scope/pkg@1.2.3""',
+    ])
+  })
+
+  it('rejects cmd expansion characters before constructing a shell line', () => {
+    expect(() => windowsCmdShimArgs('C:\\dsh.cmd', ['pkg%PATH%'])).toThrow(/unsafe/)
+    expect(unsafeSpecReason('pkg%PATH%')).toBeDefined()
   })
 })
 

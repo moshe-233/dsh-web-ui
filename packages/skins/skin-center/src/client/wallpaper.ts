@@ -103,14 +103,17 @@ export interface WallpaperHandle {
   tryOn(descriptor: WallpaperDescriptor): void
   /** Drop the try-on mount and restore the applied selection, if any. */
   exitTryOn(): void
+  /** Reconcile a live scene player after an external theme/compositor change. */
+  recoverScenePlayer(): void
   dispose(): void
 }
 
 const clamp = (value: number, min: number, max: number): number =>
   Math.max(min, Math.min(max, Math.round(value)))
 
-/** Style one fixed, non-interactive, under-everything layer. */
-function styleLayer(element: HTMLElement, zIndex: number): void {
+/** Style one fixed, non-interactive, under-everything wallpaper layer. */
+function styleLayer(element: HTMLElement, zIndex: number, layer: 'media' | 'scrim'): void {
+  element.dataset.dshWallpaperLayer = layer
   element.style.position = 'fixed'
   element.style.inset = '0'
   element.style.zIndex = String(zIndex)
@@ -152,10 +155,10 @@ function hasVisibleAlpha(value: string): boolean {
   return Number.isFinite(alpha) && alpha > 0
 }
 
-/** Exclude modal and plugin surfaces that must remain readable above the shell. */
+/** Exclude owned layers plus modal/plugin surfaces that must retain their paint. */
 function isExcludedWallpaperSurface(el: HTMLElement, zIndex: string): boolean {
   const semanticOverlay = typeof el.closest === 'function'
-    && el.closest('dialog, [role="dialog"], [aria-modal="true"], [data-shell-overlay], [data-slot="shell.overlay"], [data-dsh-plugin]') !== null
+    && el.closest('[data-dsh-wallpaper-layer], dialog, [role="dialog"], [aria-modal="true"], [data-shell-overlay], [data-slot="shell.overlay"], [data-dsh-plugin]') !== null
   if (semanticOverlay) return true
   const numericZIndex = Number.parseFloat(zIndex)
   return Number.isFinite(numericZIndex) && numericZIndex > MAX_SURFACE_OVERLAY_Z_INDEX
@@ -185,7 +188,9 @@ export function defaultWallpaperSurface(el: HTMLElement, doc: Document): boolean
     return false
   }
   // Only a rendered surface can obscure the wallpaper. In particular, avoid
-  // tagging a hidden 100%-height subtree before it has a real layout box.
+  // tagging a hidden subtree before it has a real layout box. Upstream #712:
+  // color-independent (any visible background) + min viewport coverage, so a
+  // full-height shell surface no longer misses the mark on a token mismatch.
   const fillsViewport = viewportHeight > 0
     && rectHeight >= viewportHeight * MIN_VIEWPORT_SURFACE_HEIGHT
   return fillsViewport
@@ -219,6 +224,10 @@ export interface WallpaperControllerOptions {
   /** Override the sidebar workspaces end-fade detector (tests); defaults to
    * defaultWorkspaceFade. */
   declareWorkspaceFade?: (el: HTMLElement, doc: Document) => boolean
+  /** Trailing debounce for the surface re-scan (ms). Coalesces burst DOM
+   * mutations (chat streaming) into one settled sweep; tests pass 0 to flush
+   * right after rAF. Defaults to 150. */
+  surfaceTrailMs?: number
 }
 
 /**
@@ -250,8 +259,12 @@ export class WallpaperController implements WallpaperHandle {
   private scrimLayer: HTMLDivElement | null = null
   private videoElement: HTMLVideoElement | null = null
   private rootNeutralizer: HTMLStyleElement | null = null
+  /** Re-asserts the wallpaper layers if the shell tears the body subtree down. */
+  private mountObserver: MutationObserver | null = null
+  /** Re-tags full-viewport surfaces after navigation rebuilds #root (#805). */
+  private surfaceObserver: MutationObserver | null = null
   /** Shell surfaces tagged with data-dsh-wallpaper-surface during this mount. */
-  private taggedSurfaces: HTMLElement[] = []
+  private taggedSurfaces = new Set<HTMLElement>()
   private disposed = false
   /** In-flight scene probes by wallpaper id; overlapping entry points
    *  (applySelection / tryOn / sync / fetchAndSync) must not re-read the
@@ -278,10 +291,25 @@ export class WallpaperController implements WallpaperHandle {
     // Pause-on-hidden wiring lives for the controller's whole life; it only
     // ever acts while a video is mounted.
     this.doc.addEventListener('visibilitychange', this.onVisibility)
+    this.doc.defaultView?.addEventListener('message', this.onSceneMessage)
     // Audible autoplay stays blocked until the first user gesture; retry
     // play() on that gesture so an unmuted live wallpaper starts (#580).
     this.doc.addEventListener('pointerdown', this.onFirstGesture)
     this.doc.addEventListener('keydown', this.onFirstGesture)
+    // Some DSH navigation (e.g. switching conversations) tears down the body
+    // subtree, which removes the wallpaper layers while the selection is
+    // still active. Re-mount them so the wallpaper does not disappear (#805).
+    const win = this.doc.defaultView
+    if (win !== null && typeof win.MutationObserver === 'function') {
+      this.mountObserver = new win.MutationObserver(() => {
+        if (this.disposed) return
+        if ((this.previewing ?? this.applied) === null) return
+        if (this.mediaLayer === null || !this.mediaLayer.isConnected) {
+          this.render()
+        }
+      })
+      this.mountObserver.observe(this.doc.body, { childList: true })
+    }
     if (this.enabledValue && this.selectionValue) {
       this.fetchAndSync()
     }
@@ -509,9 +537,22 @@ export class WallpaperController implements WallpaperHandle {
     this.publish()
   }
 
+  recoverScenePlayer(): void {
+    const scenePlayer = this.mediaLayer?.firstElementChild ?? null
+    if (!(scenePlayer instanceof HTMLIFrameElement) || scenePlayer.dataset.dshScenePlayer !== '') return
+    try {
+      scenePlayer.contentWindow?.postMessage({ type: 'dsh-recover-renderer' }, window.location.origin)
+    } catch {
+      // A failed recovery message is harmless; the next render keeps the current frame.
+    }
+  }
+
   dispose(): void {
     this.disposed = true
+    this.mountObserver?.disconnect()
+    this.mountObserver = null
     this.doc.removeEventListener('visibilitychange', this.onVisibility)
+    this.doc.defaultView?.removeEventListener('message', this.onSceneMessage)
     this.doc.removeEventListener('pointerdown', this.onFirstGesture)
     this.doc.removeEventListener('keydown', this.onFirstGesture)
     this.teardownLayers()
@@ -546,6 +587,17 @@ export class WallpaperController implements WallpaperHandle {
     if (this.videoElement === null || !this.videoElement.paused) return
     // jsdom (and older engines) return undefined, real browsers a promise.
     void this.videoElement.play()?.catch(() => { /* still blocked: retry on the next gesture */ })
+  }
+
+  private readonly onSceneMessage = (event: MessageEvent): void => {
+    const scenePlayer = this.mediaLayer?.firstElementChild ?? null
+    if (!(scenePlayer instanceof HTMLIFrameElement) || scenePlayer.dataset.dshScenePlayer !== '') return
+    if (event.source !== scenePlayer.contentWindow || event.origin !== this.doc.location?.origin) return
+    const message = event.data as { type?: unknown } | null
+    if (message?.type !== 'dsh-scene-needs-reload') return
+    // Context restoration invalidates every WebGL object. Reloading only the
+    // isolated renderer keeps the wallpaper selection and shell state intact.
+    scenePlayer.src = scenePlayer.src
   }
 
   private readonly onVisibility = (): void => {
@@ -605,11 +657,9 @@ export class WallpaperController implements WallpaperHandle {
           background-image: none !important;
         }
         /* Some skins (e.g. summer-liquid-glass) paint a frosted ::before on
-           the composer seat that backdrop-blurs the area behind the input.
-           While a WE wallpaper is mounted the wallpaper must stay sharp under
-           its own blur control, so neutralize the seat pseudo independently
-           of the shared scene marker (issue #777 / summer-liquid-glass). */
-        html[data-dsh-wallpaper-active] [data-composer-seat],
+           the composer seat. Neutralize that pseudo independently of the
+           shared scene marker, but leave the seat element itself available
+           for the content-gated readability frost (issues #777 and #951). */
         html[data-dsh-wallpaper-active] [data-composer-seat]::before {
           background: none !important;
           backdrop-filter: none !important;
@@ -633,14 +683,26 @@ export class WallpaperController implements WallpaperHandle {
     // shared composer-seat neutralizer applies here too (issue #777).
     setSceneBackdropActive(this.doc, 'wallpaper', true)
     this.markSurfaces()
+    this.ensureSurfaceObserver()
+    // Connect-aware: navigation (e.g. switching conversations) can tear the
+    // wallpaper layers out of the body subtree while the references survive.
+    // Re-append the surviving layer instead of recreating it, so the media
+    // child and its mediaKey survive and the video is not rebuilt / restarted
+    // (#805). Only build a fresh layer when there is none at all.
+    if (this.mediaLayer !== null && !this.mediaLayer.isConnected) {
+      this.doc.body.appendChild(this.mediaLayer)
+    }
     if (this.mediaLayer === null) {
       this.mediaLayer = this.doc.createElement('div')
-      styleLayer(this.mediaLayer, -3)
+      styleLayer(this.mediaLayer, -3, 'media')
       this.doc.body.appendChild(this.mediaLayer)
+    }
+    if (this.scrimLayer !== null && !this.scrimLayer.isConnected) {
+      this.doc.body.appendChild(this.scrimLayer)
     }
     if (this.scrimLayer === null) {
       this.scrimLayer = this.doc.createElement('div')
-      styleLayer(this.scrimLayer, -2)
+      styleLayer(this.scrimLayer, -2, 'scrim')
       this.doc.body.appendChild(this.scrimLayer)
     }
     // Capabilities (videoUrl/sceneUrl) participate in the key: the lazy
@@ -665,6 +727,17 @@ export class WallpaperController implements WallpaperHandle {
         if (child instanceof HTMLVideoElement && child.paused) {
           void child.play()?.catch(() => { /* retried on first gesture */ })
         }
+      }
+    } else {
+      // Kept the surviving layer (mediaKey matched): some browsers pause a
+      // <video> when it is torn out of the DOM, and the rebuild path above is
+      // skipped, so its play retry never ran — resume playback explicitly.
+      // Using the window-local constructor: jsdom (and isolated test envs)
+      // may not surface the global HTMLVideoElement binding in every context.
+      const child = this.mediaLayer.firstElementChild
+      const VideoCtor = this.doc.defaultView?.HTMLVideoElement
+      if (VideoCtor !== undefined && child instanceof VideoCtor && child.paused) {
+        void child.play()?.catch(() => { /* autoplay policy: stays paused until gesture */ })
       }
     }
     // Sizing mode changes apply in place: rebuilding would restart video
@@ -860,14 +933,20 @@ export class WallpaperController implements WallpaperHandle {
   private markSurfaces(): void {
     const root = this.doc.getElementById('root')
     if (root !== null) {
-      const isSurface = this.options.declareSurface ?? defaultWallpaperSurface
+      const custom = this.options.declareSurface
+      // Upstream #712 detector is color-independent (any visible background +
+      // min viewport coverage), so no per-sweep token resolution is needed.
+      // Custom detectors keep their own (el, doc) signature.
+      const isSurface = custom !== undefined
+        ? (el: HTMLElement): boolean => custom(el, this.doc)
+        : (el: HTMLElement): boolean => defaultWallpaperSurface(el, this.doc)
       const stack: Element[] = [root]
       while (stack.length > 0) {
         const node = stack.pop()
         if (node === undefined) continue
-        if (node instanceof HTMLElement && !node.hasAttribute('data-dsh-wallpaper-surface') && isSurface(node, this.doc)) {
+        if (node instanceof HTMLElement && !node.hasAttribute('data-dsh-wallpaper-surface') && isSurface(node)) {
           node.setAttribute('data-dsh-wallpaper-surface', '')
-          this.taggedSurfaces.push(node)
+          this.taggedSurfaces.add(node)
         }
         for (const child of Array.from(node.children)) stack.push(child)
       }
@@ -886,19 +965,89 @@ export class WallpaperController implements WallpaperHandle {
       if (node === undefined) continue
       if (node instanceof HTMLElement && !node.hasAttribute('data-dsh-wallpaper-surface') && isFade(node, this.doc)) {
         node.setAttribute('data-dsh-wallpaper-surface', '')
-        this.taggedSurfaces.push(node)
+        this.taggedSurfaces.add(node)
       }
       for (const child of Array.from(node.children)) stack.push(child)
     }
   }
 
+  /**
+   * Watch document.body (subtree) while a wallpaper is active and re-tag only
+   * the surfaces affected by each mutation. Navigation rebuilds #root by
+   * replacing its children, so the added subtrees are scanned instead of the
+   * whole tree; removed nodes are untagged immediately. This avoids repeated
+   * full-tree scans and forced layout during chat streaming (#review).
+   */
+  private ensureSurfaceObserver(): void {
+    if (this.disposed || this.surfaceObserver !== null) return
+    const win = this.doc.defaultView
+    if (win === null || typeof win.MutationObserver !== 'function') return
+    this.surfaceObserver = new win.MutationObserver((records) => this.handleSurfaceMutations(records))
+    this.surfaceObserver.observe(this.doc.body, { childList: true, subtree: true })
+  }
+
+  /** Incrementally tag added subtrees and untag removed subtrees. */
+  private handleSurfaceMutations(records: MutationRecord[]): void {
+    if (this.disposed || (this.previewing ?? this.applied) === null) return
+    for (const record of records) {
+      for (const node of record.addedNodes) {
+        if (node instanceof HTMLElement) this.tagAddedSubtree(node)
+      }
+      for (const node of record.removedNodes) {
+        if (node instanceof HTMLElement) this.untagRemovedSubtree(node)
+      }
+    }
+  }
+
+  /** Tag newly added elements that qualify as full-viewport surfaces or workspace fades. */
+  private tagAddedSubtree(root: HTMLElement): void {
+    const isSurface = this.options.declareSurface !== undefined
+      ? (el: HTMLElement): boolean => this.options.declareSurface!(el, this.doc)
+      : (el: HTMLElement): boolean => defaultWallpaperSurface(el, this.doc)
+    const isFade = this.options.declareWorkspaceFade ?? defaultWorkspaceFade
+    const stack: HTMLElement[] = [root]
+    while (stack.length > 0) {
+      const node = stack.pop()
+      if (node === undefined) continue
+      if (!node.hasAttribute('data-dsh-wallpaper-surface')) {
+        const inWallpaperLayer = node.closest('[data-dsh-wallpaper-layer]') !== null
+        const inWorkspaces = node.closest('[data-slot="sidebar.workspaces"]') !== null
+        if (!inWallpaperLayer && (isSurface(node) || (inWorkspaces && isFade(node, this.doc)))) {
+          node.setAttribute('data-dsh-wallpaper-surface', '')
+          this.taggedSurfaces.add(node)
+        }
+      }
+      for (const child of Array.from(node.children)) {
+        if (child instanceof HTMLElement) stack.push(child)
+      }
+    }
+  }
+
+  /** Remove tags from a removed subtree and drop its references. */
+  private untagRemovedSubtree(root: HTMLElement): void {
+    const stack: HTMLElement[] = [root]
+    while (stack.length > 0) {
+      const node = stack.pop()
+      if (node === undefined) continue
+      if (node.hasAttribute('data-dsh-wallpaper-surface')) {
+        node.removeAttribute('data-dsh-wallpaper-surface')
+        this.taggedSurfaces.delete(node)
+      }
+      for (const child of Array.from(node.children)) {
+        if (child instanceof HTMLElement) stack.push(child)
+      }
+    }
+  }
+
   private untagSurfaces(): void {
-    for (const el of this.taggedSurfaces) el.removeAttribute('data-dsh-wallpaper-surface')
-    this.taggedSurfaces = []
+    for (const el of Array.from(this.taggedSurfaces)) el.removeAttribute('data-dsh-wallpaper-surface')
+    this.taggedSurfaces.clear()
   }
 
   private teardownLayers(): void {
     this.releaseCaptureVideo()
+    this.surfaceObserver?.disconnect()
+    this.surfaceObserver = null
     this.untagSurfaces()
     delete this.doc.body.dataset.dshWallpaperActive
     delete this.doc.documentElement.dataset.dshWallpaperActive

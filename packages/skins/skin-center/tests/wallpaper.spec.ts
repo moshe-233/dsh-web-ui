@@ -15,6 +15,7 @@ import {
   type WallpaperDescriptor,
   type WallpaperHandle,
 } from '../src/client/wallpaper.ts'
+import { setSceneBackdropActive } from '../src/client/runtime/backdrop-scene.ts'
 
 interface Section {
   enabled?: boolean
@@ -83,6 +84,14 @@ const scene: WallpaperDescriptor = {
   webUrl: null,
   frameUrl: '/api/skin-center/we/scene-frame/ccc',
   previewUrl: '/api/skin-center/we/preview/ddd',
+}
+
+/** Wait until the observer-driven marker reaches an expected state. */
+async function waitForContentMarker(expected: boolean): Promise<void> {
+  await vi.waitFor(() => {
+    expect(document.body.hasAttribute('data-dsh-conversation-content')).toBe(expected)
+    expect(document.documentElement.hasAttribute('data-dsh-conversation-content')).toBe(expected)
+  })
 }
 
 /** The fixed wallpaper layers, in mount order. */
@@ -485,16 +494,26 @@ describe('WallpaperController', () => {
     controller.dispose()
   })
 
-  it('applies dim and blur to the layers', () => {
+  it('keeps the owned dim scrim out of shell-surface neutralization', async () => {
     const { scope } = fakeScope()
-    const controller = new WallpaperController(scope)
+    const controller = new WallpaperController(scope, {
+      // Force every non-owned added element through the surface path so this
+      // catches a future observer regression even though jsdom has no layout.
+      declareSurface: () => true,
+    })
     controller.applySelection(video)
     controller.setDim(60)
     controller.setBlur(10)
     const [media, scrim] = layers()
+    expect(media.dataset.dshWallpaperLayer).toBe('media')
+    expect(scrim.dataset.dshWallpaperLayer).toBe('scrim')
     expect(scrim.style.background).toContain('0.6')
     expect(media.style.filter).toContain('blur(10px)')
     expect(media.style.transform).toContain('scale')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(media.hasAttribute('data-dsh-wallpaper-surface')).toBe(false)
+    expect(scrim.hasAttribute('data-dsh-wallpaper-surface')).toBe(false)
+    expect(scrim.style.background).toContain('0.6')
     controller.dispose()
   })
 
@@ -615,40 +634,67 @@ describe('WallpaperController', () => {
     const { scope } = fakeScope()
     const controller = new WallpaperController(scope)
     expect(document.body.hasAttribute('data-dsh-backdrop-active')).toBe(false)
+    // A painted skin and a WE/WebGL wallpaper may report the shared scene at
+    // the same time; removing either source must not clobber the other.
+    setSceneBackdropActive(document, 'skin', true)
     controller.applySelection(video)
     expect(document.body.getAttribute('data-dsh-backdrop-active')).toBe('true')
     expect(document.documentElement.getAttribute('data-dsh-backdrop-active')).toBe('true')
     const neutralizer = document.head.querySelector('style[data-dsh-scene-neutralizer]')
     expect(neutralizer).not.toBeNull()
-    // The official seat mask ::before stays neutralized.
+    // Neutralize both the official seat gradient and its optional ::before
+    // mask. Only the input card may retain a content-gated blur.
+    expect(neutralizer?.textContent).toContain('html[data-dsh-backdrop-active] [data-composer-seat],')
     expect(neutralizer?.textContent).toContain('html[data-dsh-backdrop-active] [data-composer-seat]::before')
     expect(neutralizer?.textContent).toContain('background: none !important;')
-    // The input card only gets frosted blur while the conversation has
-    // content (data-dsh-conversation-content); its own translucent tint
-    // keeps readability instead of a hardcoded color.
+    expect(neutralizer?.textContent).toContain('-webkit-backdrop-filter: none !important;')
+    expect(neutralizer?.textContent).not.toContain('html[data-dsh-backdrop-active][data-dsh-conversation-content] [data-composer-seat] {')
+    expect(neutralizer?.textContent).not.toContain('var(--dsw-alias-bg-overlay) 36px')
     expect(neutralizer?.textContent).toContain('html[data-dsh-backdrop-active][data-dsh-conversation-content] [data-composer-card]')
-    expect(neutralizer?.textContent).toContain('backdrop-filter: blur(10px) !important;')
+    expect(neutralizer?.textContent).toContain('backdrop-filter: blur(var(--dsh-input-card-blur, 10px)) !important;')
     // Empty conversation: the content marker is absent, so the frost is off.
     expect(document.body.hasAttribute('data-dsh-conversation-content')).toBe(false)
-    // Adding a message row flips the marker on (observer-driven).
+    // A topic-picker or outgoing-session row outside the active scrollport
+    // must not enable the composer frost during a topic switch.
+    const staleRow = document.createElement('div')
+    staleRow.setAttribute('data-chat-anchor-key', 'stale-topic-row')
+    document.body.appendChild(staleRow)
+    await waitForContentMarker(false)
+    // A row inside the official active scrollport flips the marker on.
+    const outgoingScrollport = document.createElement('div')
+    outgoingScrollport.setAttribute('data-conversation-scroll', '')
     const row = document.createElement('div')
-    row.setAttribute('data-chat-anchor-key', '')
-    document.body.appendChild(row)
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(document.body.getAttribute('data-dsh-conversation-content')).toBe('true')
-    expect(document.documentElement.getAttribute('data-dsh-conversation-content')).toBe('true')
-    // Removing the row flips it back off.
-    row.remove()
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(document.body.hasAttribute('data-dsh-conversation-content')).toBe(false)
+    row.setAttribute('data-chat-anchor-key', 'active-turn')
+    outgoingScrollport.appendChild(row)
+    document.body.appendChild(outgoingScrollport)
+    await waitForContentMarker(true)
+    // Topic switching can leave stale rows elsewhere while replacing the
+    // active scrollport. The empty incoming topic must clear the marker.
+    const incomingScrollport = document.createElement('div')
+    incomingScrollport.setAttribute('data-conversation-scroll', '')
+    outgoingScrollport.replaceWith(incomingScrollport)
+    await waitForContentMarker(false)
+    // Older shell row suffixes remain supported, but only in the scrollport.
+    const fallbackRow = document.createElement('div')
+    fallbackRow.className = 'hash_userRow'
+    incomingScrollport.appendChild(fallbackRow)
+    await waitForContentMarker(true)
+    incomingScrollport.remove()
+    await waitForContentMarker(false)
     // The wallpaper-specific neutralizer also owns the composer seat rule as
     // hardening: some skins (summer-liquid-glass) paint a frosted ::before on
     // the seat that would blur the wallpaper if the shared marker were absent.
     const root = document.head.querySelector('style[data-dsh-wallpaper-root]')
     expect(root?.textContent).toContain('html[data-dsh-wallpaper-active] [data-composer-seat]::before')
+    expect(root?.textContent).not.toContain('html[data-dsh-wallpaper-active] [data-composer-seat],')
     expect(root?.textContent).toContain('backdrop-filter: none !important;')
-    // Teardown clears the shared marker; the shared neutralizer style stays inert.
+    // Wallpaper teardown leaves the marker active for the painted skin.
     controller.clearSelection()
+    expect(document.body.getAttribute('data-dsh-backdrop-active')).toBe('true')
+    expect(document.documentElement.getAttribute('data-dsh-backdrop-active')).toBe('true')
+    // Removing the final source clears the shared marker; the neutralizer style
+    // remains safely inert in the head.
+    setSceneBackdropActive(document, 'skin', false)
     expect(document.body.hasAttribute('data-dsh-backdrop-active')).toBe(false)
     expect(document.documentElement.hasAttribute('data-dsh-backdrop-active')).toBe(false)
     controller.dispose()
@@ -786,6 +832,92 @@ describe('WallpaperController', () => {
     controller.dispose()
     expect(fade.getAttribute('data-dsh-wallpaper-surface')).toBeNull()
   })
+
+  it('tags only added subtrees without rescanning the existing tree (incremental observer)', async () => {
+    const { scope } = fakeScope()
+    document.body.innerHTML = ''
+    const root = document.createElement('div')
+    root.id = 'root'
+    document.body.appendChild(root)
+    const existing = document.createElement('div')
+    existing.setAttribute('data-surface', '')
+    root.appendChild(existing)
+    for (let i = 0; i < 40; i++) root.appendChild(document.createElement('div'))
+    let detectorCalls = 0
+    const controller = new WallpaperController(scope, {
+      doc: document,
+      declareSurface: (el) => {
+        detectorCalls++
+        return el.hasAttribute('data-surface')
+      },
+    })
+    controller.applySelection(video)
+    expect(existing.getAttribute('data-dsh-wallpaper-surface')).toBe('')
+    // Drain observer callbacks queued by applySelection's own media-layer
+    // mutations before counting the incremental scan.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    detectorCalls = 0
+    const added = document.createElement('div')
+    const addedSurface = document.createElement('div')
+    addedSurface.setAttribute('data-surface', '')
+    added.appendChild(addedSurface)
+    root.appendChild(added)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(addedSurface.getAttribute('data-dsh-wallpaper-surface')).toBe('')
+    expect(added.getAttribute('data-dsh-wallpaper-surface')).toBeNull()
+    expect(detectorCalls).toBeLessThanOrEqual(3)
+    controller.dispose()
+  })
+
+  it('untags removed subtrees and drops their references', async () => {
+    const { scope } = fakeScope()
+    document.body.innerHTML = ''
+    const root = document.createElement('div')
+    root.id = 'root'
+    document.body.appendChild(root)
+    const surface = document.createElement('div')
+    surface.setAttribute('data-surface', '')
+    root.appendChild(surface)
+    const controller = new WallpaperController(scope, {
+      doc: document,
+      declareSurface: (el) => el.hasAttribute('data-surface'),
+    })
+    controller.applySelection(video)
+    expect(surface.getAttribute('data-dsh-wallpaper-surface')).toBe('')
+    surface.remove()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(surface.getAttribute('data-dsh-wallpaper-surface')).toBeNull()
+    const internal = controller as unknown as { taggedSurfaces: Set<HTMLElement> }
+    expect(internal.taggedSurfaces.size).toBe(0)
+    controller.dispose()
+  })
+
+  it('re-tags only the new subtree after a navigation-style #root rebuild', async () => {
+    const { scope } = fakeScope()
+    document.body.innerHTML = ''
+    const root = document.createElement('div')
+    root.id = 'root'
+    document.body.appendChild(root)
+    const oldSurface = document.createElement('div')
+    oldSurface.setAttribute('data-surface', '')
+    root.appendChild(oldSurface)
+    const controller = new WallpaperController(scope, {
+      doc: document,
+      declareSurface: (el) => el.hasAttribute('data-surface'),
+    })
+    controller.applySelection(video)
+    expect(oldSurface.getAttribute('data-dsh-wallpaper-surface')).toBe('')
+    const newSurface = document.createElement('div')
+    newSurface.setAttribute('data-surface', '')
+    root.replaceChildren(newSurface)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(oldSurface.getAttribute('data-dsh-wallpaper-surface')).toBeNull()
+    expect(newSurface.getAttribute('data-dsh-wallpaper-surface')).toBe('')
+    const internal = controller as unknown as { taggedSurfaces: Set<HTMLElement> }
+    expect(internal.taggedSurfaces.size).toBe(1)
+    controller.dispose()
+  })
+
 })
 
 /** A minimal fake WallpaperHandle recording every sync() call. */

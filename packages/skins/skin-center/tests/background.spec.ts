@@ -11,7 +11,11 @@ import {
   BackgroundController,
   BLUR_CONTENT_FIELD,
   BLUR_EMPTY_FIELD,
+  BUBBLE_ALPHA_VAR,
+  BUBBLE_OPACITY_FIELD,
   SCRIM_VAR,
+  INPUT_CARD_BLUR_FIELD,
+  INPUT_CARD_BLUR_VAR,
 } from '../src/client/background.ts'
 
 /** Shape of the fake scope's section. */
@@ -20,6 +24,8 @@ interface Section {
   backgroundOpacity?: number
   backgroundBlurEmpty?: number
   backgroundBlurContent?: number
+  inputCardBlur?: number
+  bubbleOpacity?: number
 }
 
 /** A fake SettingsScope recording every set() call. */
@@ -214,6 +220,31 @@ describe('BackgroundController', () => {
     expect(controller.enabled()).toBe(true)
     expect(document.body.style.getPropertyValue(SCRIM_VAR)).toBe('0.6')
     controller.dispose()
+  })
+
+  it('applies, persists, and cleans up input-card blur', () => {
+    const { scope, calls } = fakeScope({ inputCardBlur: 6 })
+    const controller = new BackgroundController(scope)
+    expect(controller.inputCardBlur()).toBe(6)
+    expect(document.body.style.getPropertyValue(INPUT_CARD_BLUR_VAR)).toBe('6px')
+    controller.setInputCardBlur(99)
+    expect(controller.inputCardBlur()).toBe(20)
+    expect(calls).toContainEqual({ field: INPUT_CARD_BLUR_FIELD, value: 20 })
+    controller.dispose()
+    expect(document.body.style.getPropertyValue(INPUT_CARD_BLUR_VAR)).toBe('')
+  })
+
+  it('applies, persists, and cleans up message bubble opacity', () => {
+    const { scope, calls } = fakeScope({ bubbleOpacity: 35 })
+    const controller = new BackgroundController(scope)
+    expect(controller.bubbleOpacity()).toBe(35)
+    expect(document.body.style.getPropertyValue(BUBBLE_ALPHA_VAR)).toBe('0.35')
+    controller.setBubbleOpacity(105)
+    expect(controller.bubbleOpacity()).toBe(100)
+    expect(document.body.style.getPropertyValue(BUBBLE_ALPHA_VAR)).toBe('1')
+    expect(calls).toContainEqual({ field: BUBBLE_OPACITY_FIELD, value: 100 })
+    controller.dispose()
+    expect(document.body.style.getPropertyValue(BUBBLE_ALPHA_VAR)).toBe('')
   })
 
   it('setEnabled persists via scope.set', () => {

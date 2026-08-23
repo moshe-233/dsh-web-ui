@@ -8,6 +8,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { DesktopLauncherSettingsCard, DesktopLauncherSettingsCardController, type DesktopLauncherSettings } from './DesktopLauncherSettingsCard.tsx'
 import { en, zh, type DesktopLauncherKey } from './locales.ts'
 import { mountShutdownButton } from './floating-mount.tsx'
+import { startLauncherLifecycle } from './lifecycle.ts'
 
 export { DesktopLauncherSettingsCard, DesktopLauncherSettingsCardController } from './DesktopLauncherSettingsCard.tsx'
 export type { DesktopLauncherSettings, DesktopLauncherSettingsCardFace, DesktopLauncherSettingsCardState } from './DesktopLauncherSettingsCard.tsx'
@@ -63,6 +64,7 @@ export const inject = ['slots', 'locale', 'connection', 'settingsScope', 'remote
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
+  ctx.effect(startLauncherLifecycle, 'desktop-launcher: managed browser lifecycle')
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'desktop-launcher: dictionaries')
 
   const binder = ctx.get('webUiSettings') ?? ctx.settingsScope
@@ -74,7 +76,10 @@ export function apply(ctx: ClientContext): void {
   const enabled = (): boolean => {
     const snapshot = settingsScope.getSnapshot()
     return snapshot.status === 'ready'
-      ? snapshot.value?.enabled ?? true
+      // Default off: a snapshot without an explicit `enabled` stays off.
+      ? snapshot.value?.enabled ?? false
+      // Fail-open when the settings surface is unreachable: the shutdown
+      // control must stay reachable even if the plugin config cannot be read.
       : snapshot.status === 'unavailable'
   }
   const confirmShutdown = (): boolean => read()?.confirmShutdown ?? true

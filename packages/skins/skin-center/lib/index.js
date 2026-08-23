@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { transform } from "lightningcss";
 import { readFile, stat } from "node:fs/promises";
+import { pipeline } from "node:stream";
 import { execFileSync } from "node:child_process";
 import { Buffer as Buffer$1 } from "node:buffer";
 import { decode } from "jpeg-js";
@@ -114,7 +115,7 @@ const DEPRECATED_V1_FIELDS = [
 *    by the loader, not here.
 */
 const REL_PATH = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*:\/\/)[A-Za-z0-9._\-/]+$/;
-const SKIN_ID = /^[a-z][a-z0-9-]{0,31}$/;
+const SKIN_ID$1 = /^[a-z][a-z0-9-]{0,31}$/;
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 const API_VERSION = /^x-org\.linxin666\.skin-center\/[a-z0-9]+$/;
@@ -207,7 +208,7 @@ function validateSkinManifestV2(input) {
 	for (const field of Object.keys(input)) if (DEPRECATED_SET.has(field)) warnings.push(`deprecated v1 field "${field}" ignored; run the v1→v2 migration codemod`);
 	checkKeys(input, TOP_LEVEL_KEYS, "manifest", errors);
 	if (input.skinManifestVersion !== 2) errors.push("manifest.skinManifestVersion: must be 2 (v1 manifests need the migration codemod)");
-	if (typeof input.id !== "string" || !SKIN_ID.test(input.id)) errors.push(`manifest.id: must match ${SKIN_ID} (got ${JSON.stringify(input.id)})`);
+	if (typeof input.id !== "string" || !SKIN_ID$1.test(input.id)) errors.push(`manifest.id: must match ${SKIN_ID$1} (got ${JSON.stringify(input.id)})`);
 	for (const field of [
 		"name",
 		"nameEn",
@@ -400,11 +401,13 @@ function resolveHarnessPaths(home, profile, fromUrl = import.meta.url) {
 function builtinSkinsDir(fromUrl = import.meta.url) {
 	return join(dirname(fileURLToPath(fromUrl)), "..", "skins");
 }
-/** User skins live in $DSH_HOME/skins/. DSH_SKINS_HOME overrides (tests). */
+/** User skins live in $DSH_HOME/skins with explicit directory overrides. */
 function userSkinsDir(env = process.env) {
-	const override = env.DSH_SKINS_HOME;
-	if (override && override.trim() !== "") return resolve(override);
-	return join(resolveHarnessHome(), "skins");
+	const home = env.DSH_SKINS_HOME;
+	if (home && home.trim() !== "") return resolve(home);
+	const dir = env.DSH_SKINS_DIR;
+	if (dir && dir.trim() !== "") return resolve(dir);
+	return join(resolveHarnessHome(void 0, env), "skins");
 }
 function readManifest(dir) {
 	const manifestPath = join(dir, "skin.json");
@@ -1205,6 +1208,7 @@ function transformSkinCss(css, options) {
 	}
 	out += css.slice(cursor);
 	out += `\n${scope} [id="root"] { background: transparent; }\n`;
+	out += `\n${scope} body { --shiki-background: var(--dsw-alias-markdown-code-block); }\n`;
 	if (options.deriveFallbacks === true) {
 		const fallbacks = deriveFallbackTokens(defined);
 		if (fallbacks.length > 0) out += `\n${scope} body {\n  ${fallbacks.join("\n  ")}\n}\n`;
@@ -1533,25 +1537,9 @@ function makeSkinCenterV2Routes(deps = {}) {
 }
 //#endregion
 //#region src/tap-index-adapter.ts
-/**
-* tapIndex adapter (issue #506, contract section 8) — the ONLY module in the
-* repo that calls webServer.tapIndex for skin purposes. All tapIndex usage
-* converges here so an upstream semantic change has exactly one fail-closed
-* off switch.
-*
-* What it does on every index.html response:
-*  1. stamps html[data-dsh-skin="<id>"] for the persisted active skin;
-*  2. inserts render-blocking <link> tags for the transformed stylesheet
-*     (and patches, when declared) so first paint is already skinned
-*     (anti-FOUC; mirrors the official boot-theme precedent).
-*
-* Fail-closed: any problem (no active skin, unknown id, invalid manifest,
-* malformed html) yields the unmodified document — the stock look — plus at
-* most one warning per process per reason. The tap never throws.
-* @module @linxin666/dsh-client-ui-skin-center/tap-index-adapter
-*/
 const HTML_TAG = /<html(\s[^>]*)?>/i;
 const HEAD_CLOSE = /<\/head>/i;
+const SKIN_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 /** Stamp or replace data-dsh-skin on the <html> tag. */
 function stampSkinAttribute(html, skinId) {
 	return html.replace(HTML_TAG, (match, attrs) => {
@@ -1562,14 +1550,46 @@ function stampSkinAttribute(html, skinId) {
 }
 /** Build the link tags injected before </head>. */
 function skinLinkTags(skinId, hasPatches) {
+	if (!SKIN_ID.test(skinId)) throw new TypeError(`invalid skin id: ${skinId}`);
 	const base = `${SKIN_CENTER_V2_PREFIX}/skins/${skinId}`;
 	const links = [`<link rel="stylesheet" href="${base}/stylesheet" data-dsh-skin-link="stylesheet">`];
 	if (hasPatches) links.push(`<link rel="stylesheet" href="${base}/patches" data-dsh-skin-link="patches">`);
 	return links.join("");
 }
+/** Build the structured rows collected fresh for every index render. */
+function makeSkinIndexRows(deps) {
+	const loadCatalog = deps.loadCatalog ?? (() => loadSkinCatalog());
+	const warn = deps.warn ?? ((message) => console.warn(`[skin-center] ${message}`));
+	const warned = /* @__PURE__ */ new Set();
+	const warnOnce = (reason, message) => {
+		if (warned.has(reason)) return;
+		warned.add(reason);
+		warn(message);
+	};
+	return () => {
+		try {
+			const active = deps.readActiveId();
+			if (!active) return [];
+			const entry = findSkin(loadCatalog(), active);
+			if (!entry) {
+				warnOnce(`missing:${active}`, `active skin "${active}" not in catalog; serving stock look`);
+				return [];
+			}
+			return [{
+				kind: "html",
+				placement: "head",
+				html: skinLinkTags(active, entry.manifest.contributes.patches !== void 0)
+			}];
+		} catch (error) {
+			warnOnce("row-error", `skin index rows failed closed: ${error?.message ?? error}`);
+			return [];
+		}
+	};
+}
 /**
-* Create the index.html tap. Pure html→html, safe to register with
-* webServer.tapIndex; never throws.
+* Create the raw index tap. Structured rows run before it on DSH 0.1.1; when
+* their marker is present the tap only stamps the html element. Without the
+* marker it also injects links, preserving fail-closed behavior on older hosts.
 */
 function makeSkinIndexTap(deps) {
 	const loadCatalog = deps.loadCatalog ?? (() => loadSkinCatalog());
@@ -1593,8 +1613,10 @@ function makeSkinIndexTap(deps) {
 				warnOnce("malformed-html", "index.html has no <html>/</head> anchors; skipping skin injection");
 				return html;
 			}
+			const stamped = stampSkinAttribute(html, active);
+			if (stamped.includes("data-dsh-skin-link=")) return stamped;
 			const links = skinLinkTags(active, entry.manifest.contributes.patches !== void 0);
-			return stampSkinAttribute(html, active).replace(HEAD_CLOSE, `${links}</head>`);
+			return stamped.replace(HEAD_CLOSE, `${links}</head>`);
 		} catch (error) {
 			warnOnce("tap-error", `skin index tap failed closed: ${error?.message ?? error}`);
 			return html;
@@ -1915,6 +1937,21 @@ function librariesFromVdf(vdfText) {
 	}
 	return libraries;
 }
+/** Every Steam library root listed in libraryfolders.vdf, independent of its stale apps cache. */
+function allLibrariesFromVdf(vdfText) {
+	const libraries = [];
+	for (const line of vdfText.split(/\r?\n/)) {
+		const match = /^\s*"path"\s+"([^"]+)"\s*$/.exec(line);
+		if (match === null) continue;
+		const root = match[1].replace(/\\\\/g, "\\");
+		if (!libraries.includes(root)) libraries.push(root);
+	}
+	return libraries;
+}
+/** Durable ownership fact used when libraryfolders.vdf has not refreshed its apps block. */
+function libraryOwnsAppFromManifest(library, appid, exists = existsSync) {
+	return exists(join(library, "steamapps", `appmanifest_${appid}.acf`));
+}
 /**
 * Locate the Wallpaper Engine install directory (holds wallpaper32.exe).
 * Probes: registry Steam root, well-known paths, then every library that
@@ -1932,7 +1969,7 @@ function locateWallpaperEngine(opts = {}) {
 		for (const probe of probes) {
 			const vdf = join(probe, "steamapps", "libraryfolders.vdf");
 			if (exists(vdf)) try {
-				libraries.push(...librariesFromVdf(readFileSync(vdf, "utf8")));
+				libraries.push(...allLibrariesFromVdf(readFileSync(vdf, "utf8")));
 			} catch {}
 		}
 		const candidates = [];
@@ -1951,14 +1988,20 @@ function owningLibraries(opts = {}) {
 	if (process.platform !== "win32" && !opts.exists) return [];
 	const registry = opts.registry ?? (() => steamPathFromRegistry());
 	const probes = [...new Set([registry(), ...STEAM_PROBE_DIRS].filter((d) => !!d))];
-	const libraries = [];
+	const libraries = /* @__PURE__ */ new Set();
 	for (const probe of probes) {
 		const vdf = join(probe, "steamapps", "libraryfolders.vdf");
-		if (exists(vdf)) try {
-			libraries.push(...librariesFromVdf(readFileSync(vdf, "utf8")));
-		} catch {}
+		if (!exists(vdf)) continue;
+		let vdfText;
+		try {
+			vdfText = readFileSync(vdf, "utf8");
+		} catch {
+			continue;
+		}
+		for (const root of librariesFromVdf(vdfText)) libraries.add(root);
+		for (const root of allLibrariesFromVdf(vdfText)) if (libraryOwnsAppFromManifest(root, "431960", exists)) libraries.add(root);
 	}
-	return [...new Set(libraries)];
+	return [...libraries];
 }
 /** Infer the wallpaper type from the main file extension (project.json fallback). */
 function inferType(file) {
@@ -2119,6 +2162,45 @@ function scanProjectsRoot(root, source) {
 	}
 	return entries;
 }
+/**
+* Scan a user-supplied path at any supported Wallpaper Engine level: a
+* project folder, project collection, WE install root, Steam library root,
+* steamapps folder, or workshop content root.
+*/
+function scanManualWallpaperRoot(root) {
+	const candidates = [
+		{
+			root,
+			source: "local"
+		},
+		{
+			root: join(root, "projects", "defaultprojects"),
+			source: "local"
+		},
+		{
+			root: join(root, "projects", "myprojects"),
+			source: "local"
+		},
+		{
+			root: join(root, "steamapps", "workshop", "content", WE_APPID),
+			source: "workshop"
+		},
+		{
+			root: join(root, "workshop", "content", WE_APPID),
+			source: "workshop"
+		}
+	];
+	if (basename(root).toLowerCase() === "wallpaper_engine") candidates.push({
+		root: join(dirname(dirname(root)), "workshop", "content", WE_APPID),
+		source: "workshop"
+	});
+	const found = /* @__PURE__ */ new Map();
+	for (const candidate of candidates) {
+		if (!existsSync(candidate.root)) continue;
+		for (const entry of scanProjectsRoot(candidate.root, candidate.source)) if (!found.has(entry.id)) found.set(entry.id, entry);
+	}
+	return [...found.values()];
+}
 /** Read one import-store entry's manifest.json; null when absent/invalid. */
 function readImportedManifest(entryDir) {
 	const path = join(entryDir, "manifest.json");
@@ -2226,7 +2308,7 @@ function buildInventory(opts = {}) {
 	for (const manual of opts.manualDirs ?? []) {
 		const trimmed = firstNonBlank(manual);
 		const dir = trimmed !== void 0 ? expandUser(trimmed) : void 0;
-		if (dir !== void 0 && existsSync(dir)) for (const entry of scanProjectsRoot(dir, "local")) add(entry);
+		if (dir !== void 0 && existsSync(dir)) for (const entry of scanManualWallpaperRoot(dir)) add(entry);
 	}
 	const imported = opts.storeDir ? scanImportStore(opts.storeDir) : [];
 	for (const entry of imported) {
@@ -2286,6 +2368,7 @@ function buildInventory(opts = {}) {
 var pkg_extract_exports = /* @__PURE__ */ __exportAll({
 	PKG_ENTRY_FLAG_LZ4: () => 1,
 	TexFormat: () => TexFormat,
+	TexUnsupportedError: () => TexUnsupportedError,
 	buildSceneManifest: () => buildSceneManifest,
 	buildSceneManifestFromDir: () => buildSceneManifestFromDir,
 	decodePngToRgba: () => decodePngToRgba,
@@ -2347,6 +2430,29 @@ const TEX_FORMAT_NAMES = {
 	13: "RGBA1010102",
 	14: "RGBA16161616F",
 	15: "RGB161616F"
+};
+/**
+* A TEX format that is recognized but has no decode implementation in this
+* build (e.g. BC7, 16-bit float). Callers treat it as 'not supported here'
+* rather than a data-corruption failure, so the scene pipeline never emits a
+* partially decoded frame for it and falls back to the author preview (#906).
+*/
+var TexUnsupportedError = class extends Error {
+	/** Raw TEXI0001 format id. */
+	format;
+	/** Human-readable name of the format id, or 'unknown(N)'. */
+	formatName;
+	/** Declared TEXI0001 texture dimensions. */
+	width;
+	height;
+	constructor(format, formatName, width, height) {
+		super("tex: unsupported format " + format);
+		this.name = "TexUnsupportedError";
+		this.format = format;
+		this.formatName = formatName;
+		this.width = width;
+		this.height = height;
+	}
 };
 /** TEXI0001 flags bit marking an animated (sprite-sheet / gif) texture. */
 const TEX_FLAG_IS_GIF = 4;
@@ -2686,7 +2792,7 @@ function parseTexInternal(data) {
 	const imageWidth = r.i32();
 	const imageHeight = r.i32();
 	r.u32();
-	if (TEX_FORMAT_NAMES[format] === void 0) throw new Error("tex: unsupported format " + format);
+	if (TEX_FORMAT_NAMES[format] === void 0) throw new TexUnsupportedError(format, "unknown(" + format + ")", textureWidth, textureHeight);
 	const containerMagic = r.nstring(16);
 	const containerMatch = /^TEXB000([1-4])$/.exec(containerMagic);
 	if (!containerMatch) throw new Error("tex: bad mipmap container magic '" + containerMagic + "'");
@@ -3046,7 +3152,7 @@ function decodeTex(data) {
 			};
 			break;
 		}
-		default: throw new Error("tex: unsupported format " + parsed.format);
+		default: throw new TexUnsupportedError(parsed.format, TEX_FORMAT_NAMES[parsed.format] ?? "unknown(" + parsed.format + ")", parsed.width, parsed.height);
 	}
 	return cropToImageRect(decoded, parsed.width, parsed.height);
 }
@@ -3316,14 +3422,19 @@ function getTextureScore(path) {
 	if (lower.includes("昼夜变化") || lower.includes("mddn") || lower.includes("transition")) score -= 30;
 	return score;
 }
-/** Composite layered 2D sprite scenes into a single full-resolution frame. */
-function tryCompositeMultiLayerScene(scene, access) {
+/** Composite layered 2D sprite scenes into a single full-resolution frame.
+* Rejects the composite when the scene's top-ranked texture (the intended
+* main art) is not among the decoded layers — e.g. an unsupported BC7 main
+* texture — so the caller falls back to the per-candidate path and the
+* author preview instead of emitting a partial frame (#906). */
+function tryCompositeMultiLayerScene(scene, access, topCandidate) {
 	const objects = Array.isArray(scene.objects) ? scene.objects : [];
 	const imageObjects = objects.filter((obj) => obj && typeof obj === "object" && typeof obj.image === "string" && !String(obj.image).startsWith("models/util/") && !isLikelyMaskOrHelper(String(obj.image)));
 	if (imageObjects.length <= 1) return null;
 	let canvasWidth = 1920;
 	let canvasHeight = 1080;
 	const layers = [];
+	const layerSources = [];
 	let hasLargeBase = false;
 	for (const obj of objects) {
 		if (!obj.image || typeof obj.image !== "string" || obj.image.startsWith("models/util/")) continue;
@@ -3373,9 +3484,11 @@ function tryCompositeMultiLayerScene(scene, access) {
 			height: decoded.height,
 			rgba: decoded.rgba
 		});
+		layerSources.push(texPath);
 	}
 	if (imageObjects.length >= 3 && layers.length <= 1) throw new Error("pkg: multi-layer scene composition requires full preview render");
 	if (layers.length <= 1 || !hasLargeBase) return null;
+	if (topCandidate !== null && !layerSources.some((p) => p.toLowerCase() === topCandidate.toLowerCase())) return null;
 	const canvas = new Uint8Array(canvasWidth * canvasHeight * 4);
 	for (const layer of layers) for (let y = 0; y < layer.height; y++) {
 		const cy = layer.y + y;
@@ -3413,8 +3526,6 @@ function extractSceneMainImageVia(access, label) {
 	if (!scene || !Array.isArray(scene.objects)) throw new Error(label + ": scene.json not found or invalid");
 	const projection = sceneProjectionSize(scene);
 	if (scene.objects.some((obj) => obj && typeof obj === "object" && typeof obj.model === "string" && obj.model.length > 0)) throw new Error(label + ": 3D scene cannot be extracted as 2D frame");
-	const composite = tryCompositeMultiLayerScene(scene, access);
-	if (composite !== null) return composite;
 	const rawCandidates = [];
 	for (const obj of scene.objects) if (obj && typeof obj === "object" && typeof obj.image === "string") rawCandidates.push(...collectImageObjectTextures(obj, access.readJson));
 	const allCandidates = [];
@@ -3445,6 +3556,8 @@ function extractSceneMainImageVia(access, label) {
 	});
 	const candidates = ranked.map((r) => r.path);
 	if (candidates.length === 0) throw new Error(label + ": no texture candidates found");
+	const composite = tryCompositeMultiLayerScene(scene, access, candidates[0] ?? null);
+	if (composite !== null) return composite;
 	let lastError = null;
 	for (const path of candidates) {
 		if (isLikelyMaskOrHelper(path)) continue;
@@ -3495,6 +3608,7 @@ function extractSceneMainImageVia(access, label) {
 				texturePath: file.path
 			};
 		} catch (err) {
+			if (err instanceof TexUnsupportedError && path === candidates[0]) throw err;
 			lastError = err;
 		}
 	}
@@ -3869,6 +3983,16 @@ function parseMdl(buf) {
 	}
 	return meshes;
 }
+function containsEmbeddedScript(value, seen = /* @__PURE__ */ new Set()) {
+	if (value === null || typeof value !== "object") return false;
+	if (seen.has(value)) return false;
+	seen.add(value);
+	if (!Array.isArray(value)) {
+		const record = value;
+		if (typeof record.script === "string" && record.script.trim() !== "") return true;
+	}
+	return Object.values(value).some((child) => containsEmbeddedScript(child, seen));
+}
 function buildSceneManifestVia(access, token) {
 	let scene = access.readJson("scene.json");
 	const project = access.readJson("project.json");
@@ -3885,6 +4009,7 @@ function buildSceneManifestVia(access, token) {
 		height,
 		hasMeteors: false,
 		hasFireflies: false,
+		scripted: containsEmbeddedScript(scene),
 		layers: []
 	};
 	const allTex = access.listTexPaths();
@@ -4618,6 +4743,7 @@ const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
 
   let sceneData = null;
   let isPaused = false;
+  let contextLost = false;
   let fitMode = 'cover';
   let startTime = performance.now();
   let lastTime = performance.now();
@@ -6440,6 +6566,7 @@ const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
   // Crash guard: a render exception must not freeze the wallpaper silently.
   function render(now) {
     try {
+      if (contextLost) { requestAnimationFrame(render); return; }
       renderFrame(now);
     } catch (e) {
       if (!window.__weRenderErr) {
@@ -6449,6 +6576,17 @@ const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
       requestAnimationFrame(render);
     }
   }
+
+  canvas.addEventListener('webglcontextlost', (event) => {
+    event.preventDefault();
+    contextLost = true;
+  });
+  canvas.addEventListener('webglcontextrestored', () => {
+    // WebGL objects are invalid after restoration. Ask the embedding
+    // controller to rebuild this isolated renderer instead of drawing with
+    // stale programs/textures.
+    window.parent.postMessage({ type: 'dsh-scene-needs-reload' }, window.location.origin);
+  });
 
   // Load manifest
   const token = window.location.pathname.split('/').filter(Boolean).pop();
@@ -6471,6 +6609,15 @@ const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
       fitMode = msg.fit;
     } else if (msg.type === 'dsh-set-pause') {
       isPaused = !!msg.paused;
+    } else if (msg.type === 'dsh-recover-renderer') {
+      if (gl.isContextLost()) {
+        const ext = gl.getExtension('WEBGL_lose_context');
+        if (ext) ext.restoreContext();
+        else window.parent.postMessage({ type: 'dsh-scene-needs-reload' }, window.location.origin);
+      } else {
+        // Force an immediate fresh frame after compositor/theme changes.
+        renderFrame(performance.now());
+      }
     }
   });
 
@@ -6620,8 +6767,28 @@ function mimeFor(absPath) {
 		wasm: "application/wasm"
 	}[extname(absPath).slice(1).toLowerCase()] || "application/octet-stream";
 }
+/** Pipe one file while coupling its descriptor lifetime to the HTTP response. */
+function pipeFile(absPath, res, openReadStream, options) {
+	if (res.destroyed || res.writableEnded) return;
+	const source = openReadStream(absPath, options);
+	const closeSource = () => source.destroy();
+	res.once("close", closeSource);
+	if (res.destroyed || res.writableEnded) {
+		res.off("close", closeSource);
+		source.destroy();
+		return;
+	}
+	try {
+		pipeline(source, res, () => {
+			res.off("close", closeSource);
+		});
+	} catch {
+		res.off("close", closeSource);
+		source.destroy();
+	}
+}
 /** Stream one file with Range support (video seeking needs 206). */
-function serveFile(absPath, req, res) {
+function serveFile(absPath, req, res, openReadStream) {
 	if (!existsSync(absPath) || !statSync(absPath).isFile()) {
 		json(res, 404, {
 			ok: false,
@@ -6648,21 +6815,24 @@ function serveFile(absPath, req, res) {
 		res.statusCode = 206;
 		res.setHeader("Content-Range", "bytes " + String(start) + "-" + String(end) + "/" + String(size));
 		res.setHeader("Content-Length", String(end - start + 1));
-		createReadStream(absPath, {
+		pipeFile(absPath, res, openReadStream, {
 			start,
 			end
-		}).pipe(res);
+		});
 		return;
 	}
 	res.setHeader("Content-Length", String(size));
-	createReadStream(absPath).pipe(res);
+	pipeFile(absPath, res, openReadStream);
 }
+/** Cached per-scene capability probe result. */
+const SCENE_PROBE_VERSION = 3;
 /** Shape-check an entry loaded from the persisted probe cache. */
 function isSceneProbe(value) {
-	return value !== null && typeof value === "object" && typeof value.hasVideo === "boolean" && typeof value.hasSceneWebGL === "boolean";
+	return value !== null && typeof value === "object" && value.v === SCENE_PROBE_VERSION && typeof value.hasVideo === "boolean" && typeof value.hasSceneWebGL === "boolean" && (value.compatibility === "full" || value.compatibility === "partial" || value.compatibility === "static-only") && Array.isArray(value.unsupportedFeatures);
 }
 /** Build the route family. */
 function makeWeRoutes(deps) {
+	const openReadStream = deps.openReadStream ?? createReadStream;
 	const tokenStorePath = join(deps.storeDir, ".cache", "we-tokens.json");
 	let mediaMap = /* @__PURE__ */ new Map();
 	try {
@@ -6812,17 +6982,26 @@ function makeWeRoutes(deps) {
 				if (!probe) {
 					let hasVideo = false;
 					let hasSceneWebGL = false;
+					let compatibility = "full";
+					const unsupportedFeatures = [];
 					try {
 						const pkgData = await readFile(entry.fileAbs);
 						hasVideo = entry.fileAbs.toLowerCase().endsWith(".json") ? hasSceneVideoFromDir(dirname(entry.fileAbs)) : hasSceneVideo(pkgData);
 						if (!hasVideo) {
 							const manifest = entry.fileAbs.toLowerCase().endsWith(".json") ? buildSceneManifestFromDir(dirname(entry.fileAbs), "check") : buildSceneManifest(pkgData, "check");
+							if (manifest?.scripted) {
+								compatibility = "partial";
+								unsupportedFeatures.push("embedded-script");
+							}
 							hasSceneWebGL = Boolean(manifest && (manifest.layers && manifest.layers.length >= 1 || manifest.is3D && manifest.models && manifest.models.length > 0));
 						}
 					} catch {}
 					probe = {
+						v: SCENE_PROBE_VERSION,
 						hasVideo,
-						hasSceneWebGL
+						hasSceneWebGL,
+						compatibility,
+						unsupportedFeatures
 					};
 					if (mtimeMs > 0) {
 						sceneProbeCache.set(key, probe);
@@ -6840,7 +7019,9 @@ function makeWeRoutes(deps) {
 				json(res, 200, {
 					ok: true,
 					videoUrl: videoToken !== null ? "/api/skin-center/we/scene-video/" + videoToken : null,
-					sceneUrl: sceneToken !== null ? "/api/skin-center/we/scene-runtime/" + sceneToken : null
+					sceneUrl: sceneToken !== null ? "/api/skin-center/we/scene-runtime/" + sceneToken : null,
+					compatibility: probe.compatibility,
+					unsupportedFeatures: probe.unsupportedFeatures
 				});
 			} catch (error) {
 				json(res, 500, {
@@ -6899,7 +7080,7 @@ function makeWeRoutes(deps) {
 						return;
 					}
 				} catch {}
-				serveFile(abs, req, res);
+				serveFile(abs, req, res, openReadStream);
 			}
 		});
 	}
@@ -6941,7 +7122,7 @@ function makeWeRoutes(deps) {
 					writeFileSync(cachePath, videoBytes);
 					pruneStaleSceneCache(cacheDir, base, key);
 				}
-				serveFile(cachePath, req, res);
+				serveFile(cachePath, req, res, openReadStream);
 			})().catch((error) => {
 				json(res, 422, {
 					ok: false,
@@ -7009,7 +7190,7 @@ function makeWeRoutes(deps) {
 				res.end(injected);
 				return;
 			}
-			serveFile(abs, req, res);
+			serveFile(abs, req, res, openReadStream);
 		}
 	});
 	const framePrefix = "/api/skin-center/we/scene-frame/";
@@ -7045,8 +7226,18 @@ function makeWeRoutes(deps) {
 				}
 				res.setHeader("Content-Type", "image/png");
 				res.setHeader("Cache-Control", "no-store");
-				createReadStream(cachePath).pipe(res);
+				pipeFile(cachePath, res, openReadStream);
 			})().catch((error) => {
+				if (error instanceof TexUnsupportedError) {
+					json(res, 422, {
+						ok: false,
+						error: "unsupported-tex-format",
+						format: error.format,
+						formatName: error.formatName,
+						message: error.message
+					});
+					return;
+				}
 				json(res, 422, {
 					ok: false,
 					error: error instanceof Error ? error.message : String(error)
@@ -7349,6 +7540,26 @@ function mountOnce(packageName, fn) {
 	});
 }
 //#endregion
+//#region src/core/custom-theme.ts
+/** Versioned user theme derived from the official stock theme. */
+const SKIN_CUSTOM_THEME_NS = "skin-custom-theme";
+const CUSTOM_THEME_DEFAULTS = {
+	version: 1,
+	applied: false,
+	light: {
+		accent: "#4d6bfe",
+		background: "#f7f8fa",
+		foreground: "#262626",
+		contrast: 50
+	},
+	dark: {
+		accent: "#7c91ff",
+		background: "#171719",
+		foreground: "#f3f3f3",
+		contrast: 50
+	}
+};
+//#endregion
 //#region src/index.ts
 /** Stable cordis plugin name (matches cordis.patch.yml insert id). */
 const name = "ui-skin-center";
@@ -7360,6 +7571,26 @@ const inject = ["webServer"];
 * scope without depending on this Host package.
 */
 const SKIN_BACKGROUND_NAMESPACE = settingsNamespace("skin-background");
+/** Versioned settings namespace for the official-theme palette editor. */
+const SKIN_CUSTOM_THEME_NAMESPACE = settingsNamespace(SKIN_CUSTOM_THEME_NS);
+const CustomThemeProfileSchema = z.object({
+	accent: z.string().default(CUSTOM_THEME_DEFAULTS.light.accent),
+	background: z.string().default(CUSTOM_THEME_DEFAULTS.light.background),
+	foreground: z.string().default(CUSTOM_THEME_DEFAULTS.light.foreground),
+	contrast: z.number().min(0).max(100).step(1).default(50)
+});
+/** Host-side persistence schema; browser normalization remains fail-closed. */
+const SkinCustomThemeConfigSchema = z.object({
+	version: z.number().min(1).max(1).step(1).default(1),
+	applied: z.boolean().default(false),
+	light: CustomThemeProfileSchema.default(CUSTOM_THEME_DEFAULTS.light),
+	dark: z.object({
+		accent: z.string().default(CUSTOM_THEME_DEFAULTS.dark.accent),
+		background: z.string().default(CUSTOM_THEME_DEFAULTS.dark.background),
+		foreground: z.string().default(CUSTOM_THEME_DEFAULTS.dark.foreground),
+		contrast: z.number().min(0).max(100).step(1).default(50)
+	}).default(CUSTOM_THEME_DEFAULTS.dark)
+});
 /**
 * Runtime schema for SkinBackgroundConfig. Persists the master switch
 * (`enabled`) alongside the background strength fields.
@@ -7368,7 +7599,9 @@ const SkinBackgroundConfigSchema = z.object({
 	enabled: z.boolean().default(true),
 	backgroundOpacity: z.number().min(0).max(100).step(5).default(0),
 	backgroundBlurEmpty: z.number().min(0).max(20).step(1).default(0),
-	backgroundBlurContent: z.number().min(0).max(20).step(1).default(0)
+	backgroundBlurContent: z.number().min(0).max(20).step(1).default(0),
+	inputCardBlur: z.number().min(0).max(20).step(1).default(10),
+	bubbleOpacity: z.number().min(0).max(100).step(5).default(50)
 });
 /**
 * Settings namespace for the Wallpaper Engine bridge, owned by the skin
@@ -7406,6 +7639,14 @@ function applyImpl(ctx) {
 		setSource: () => {},
 		onChange: () => {}
 	});
+	installSettingsSection(ctx, SKIN_CUSTOM_THEME_NAMESPACE, SkinCustomThemeConfigSchema, {
+		...CUSTOM_THEME_DEFAULTS,
+		light: { ...CUSTOM_THEME_DEFAULTS.light },
+		dark: { ...CUSTOM_THEME_DEFAULTS.dark }
+	}, {
+		setSource: () => {},
+		onChange: () => {}
+	});
 	let wallpaperSource = () => ({});
 	installSettingsSection(ctx, SKIN_WALLPAPER_NAMESPACE, SkinWallpaperConfigSchema, {}, {
 		setSource: (source) => {
@@ -7423,7 +7664,12 @@ function applyImpl(ctx) {
 			try {
 				for (const route of routes) disposers.push(ctx.webServer.register(route));
 				const statePath = defaultActiveStatePath();
-				disposers.push(ctx.webServer.tapIndex(makeSkinIndexTap({ readActiveId: () => readActiveSelection(statePath) })));
+				const indexDeps = { readActiveId: () => readActiveSelection(statePath) };
+				const collectSkinRows = makeSkinIndexRows(indexDeps);
+				disposers.push(ctx.on("webserver/index-inject", (table) => {
+					table.push(...collectSkinRows());
+				}));
+				disposers.push(ctx.webServer.tapIndex(makeSkinIndexTap(indexDeps)));
 			} catch (error) {
 				for (const dispose of disposers) dispose();
 				throw error;
@@ -7448,4 +7694,4 @@ function applyImpl(ctx) {
 	}
 }
 //#endregion
-export { SKIN_BACKGROUND_NAMESPACE, SKIN_CENTER_V2_PREFIX, SKIN_WALLPAPER_NAMESPACE, SkinBackgroundConfigSchema, SkinCssSafetyError, SkinWallpaperConfigSchema, WE_API_PREFIX, apply, builtinSkinsDir, defaultActiveStatePath, findSkin, inject, loadSkinCatalog, makeSkinCenterV2Routes, makeWeRoutes, name, readActiveSelection, resolveInsideSkin, transformSkinCss, userSkinsDir, validateSkinManifestV2, writeActiveSelection };
+export { SKIN_BACKGROUND_NAMESPACE, SKIN_CENTER_V2_PREFIX, SKIN_CUSTOM_THEME_NAMESPACE, SKIN_WALLPAPER_NAMESPACE, SkinBackgroundConfigSchema, SkinCssSafetyError, SkinCustomThemeConfigSchema, SkinWallpaperConfigSchema, WE_API_PREFIX, apply, builtinSkinsDir, defaultActiveStatePath, findSkin, inject, loadSkinCatalog, makeSkinCenterV2Routes, makeWeRoutes, name, readActiveSelection, resolveInsideSkin, transformSkinCss, userSkinsDir, validateSkinManifestV2, writeActiveSelection };

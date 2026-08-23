@@ -12,13 +12,11 @@ and Linux (.desktop).
 - Settings → Plugin configuration → Web UI plugins card with a "Create desktop
   icon" button; the host writes the launcher script under
   `~/.dsh/desktop-launcher/` and places the icon on the Desktop.
-- Double-click behavior: probe the GUI URL; if it responds, open the browser.
-  Otherwise start `dsh web` (hidden on Windows), poll for up to 30 seconds,
-  then open the browser. If the `dsh` command is missing, the launcher shows a
-  message instead of failing silently.
+- Double-click behavior: probe the GUI URL; if it responds, open the browser without taking ownership of the existing process. Otherwise start `dsh web` (hidden on Windows), poll for up to 30 seconds, then open a managed browser tab. Closing the final managed tab stops that launcher-started host after a short reload grace; another managed tab or an ordinary page refresh keeps it alive. If the `dsh` command is missing, the launcher shows a message instead of failing silently.
 - The launcher is regenerated from the live settings each time you click the
   button, so `dshCommand`, `url` and `profile` changes apply on the next
   creation without editing the icon target.
+- Windows launcher and shortcut-installer scripts are written as UTF-8 with a BOM for Windows PowerShell 5.1 and non-ASCII user paths. Command lookup prefers the npm `dsh.cmd`/executable shim over `dsh.ps1`; a PowerShell-script-only fallback is invoked explicitly through `powershell.exe` rather than through file association.
 - The Windows shortcut uses the DeepSeek Harness whale icon (white background)
   and shows a styled "starting" popup instead of a console window: it reports
   progress (starting dsh, waiting for the GUI) and surfaces failures (missing
@@ -42,8 +40,8 @@ pnpm -r build
 dsh plugin --profile web add link:$(pwd)/packages/dsh-desktop-launcher
 ```
 
-Restart `dsh web`, open Settings → Plugin configuration → Web UI plugins, and
-click "Create desktop icon".
+Restart `dsh web`, open Settings → Plugin configuration → Web UI plugins,
+enable the plugin (it ships off by default), and click "Create desktop icon".
 
 ## Config
 
@@ -51,8 +49,8 @@ All fields live in the plugin settings card (or in the composition entry):
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `true` | Master switch for the plugin. |
-| `announceToAgent` | `true` | Announce the plugin in the system prompt. |
+| `enabled` | `false` | Master switch for the plugin; off by default. |
+| `announceToAgent` | `false` | Opt-in: when true, announces the plugin in the system prompt. |
 | `dshCommand` | `dsh` | Command that starts dsh; must be on PATH. |
 | `url` | `http://127.0.0.1:3080` | GUI URL the launcher waits for and opens. |
 | `profile` | unset | Optional `--profile` argument passed to `dsh web`. |
@@ -60,8 +58,7 @@ All fields live in the plugin settings card (or in the composition entry):
 
 ## Security model
 
-- The host API is loopback-only: requests from non-local addresses, foreign
-  Host headers and cross-site origins are rejected with 403.
+- The host API is loopback-only: requests from non-local addresses, foreign Host headers and cross-site origins are rejected with 403. Automatic lifecycle requests additionally require a random token inherited only by the shortcut-started host; the token is delivered in the URL fragment, removed from history, and scoped to the managed tab's session storage.
 - The plugin writes only two places: `~/.dsh/desktop-launcher/` (launcher
   scripts) and the user's Desktop directory (the icon).
 - On Linux the icon creation best-effort marks the `.desktop` file as trusted

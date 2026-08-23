@@ -14,7 +14,7 @@ import z from 'schemastery'
 // Type-only: pulls the dsh-host-webserver service seat (ctx.webServer).
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { makeSkinCenterV2Routes } from './routes-v2.ts'
-import { makeSkinIndexTap } from './tap-index-adapter.ts'
+import { makeSkinIndexRows, makeSkinIndexTap } from './tap-index-adapter.ts'
 import { defaultActiveStatePath, readActiveSelection } from './active-state.ts'
 import { migrateLegacySelection } from './legacy-bridge.ts'
 import { loadSkinCatalog } from './skin-repo.ts'
@@ -22,6 +22,12 @@ import { makeWeRoutes } from './we-routes.ts'
 import { defaultWallpapersStoreDir } from './we-library.ts'
 import { resolveHarnessHome } from './harness-home.ts'
 import { mountOnce } from './mount-once.ts'
+import {
+  CUSTOM_THEME_DEFAULTS,
+  CUSTOM_THEME_VERSION,
+  SKIN_CUSTOM_THEME_NS,
+  type CustomThemeConfig,
+} from './core/custom-theme.ts'
 
 export { makeSkinCenterV2Routes, SKIN_CENTER_V2_PREFIX } from './routes-v2.ts'
 export { makeWeRoutes, WE_API_PREFIX } from './we-routes.ts'
@@ -46,6 +52,31 @@ export const inject = ['webServer']
  * scope without depending on this Host package.
  */
 export const SKIN_BACKGROUND_NAMESPACE = settingsNamespace('skin-background')
+
+/** Versioned settings namespace for the official-theme palette editor. */
+export const SKIN_CUSTOM_THEME_NAMESPACE = settingsNamespace(SKIN_CUSTOM_THEME_NS)
+
+export type SkinCustomThemeConfig = CustomThemeConfig
+
+const CustomThemeProfileSchema = z.object({
+  accent: z.string().default(CUSTOM_THEME_DEFAULTS.light.accent),
+  background: z.string().default(CUSTOM_THEME_DEFAULTS.light.background),
+  foreground: z.string().default(CUSTOM_THEME_DEFAULTS.light.foreground),
+  contrast: z.number().min(0).max(100).step(1).default(50),
+})
+
+/** Host-side persistence schema; browser normalization remains fail-closed. */
+export const SkinCustomThemeConfigSchema: z<SkinCustomThemeConfig> = z.object({
+  version: z.number().min(CUSTOM_THEME_VERSION).max(CUSTOM_THEME_VERSION).step(1).default(CUSTOM_THEME_VERSION),
+  applied: z.boolean().default(false),
+  light: CustomThemeProfileSchema.default(CUSTOM_THEME_DEFAULTS.light),
+  dark: z.object({
+    accent: z.string().default(CUSTOM_THEME_DEFAULTS.dark.accent),
+    background: z.string().default(CUSTOM_THEME_DEFAULTS.dark.background),
+    foreground: z.string().default(CUSTOM_THEME_DEFAULTS.dark.foreground),
+    contrast: z.number().min(0).max(100).step(1).default(50),
+  }).default(CUSTOM_THEME_DEFAULTS.dark),
+})
 
 /**
  * Plugin-configuration fields for the main-interface background, plus the
@@ -73,6 +104,10 @@ export interface SkinBackgroundConfig {
    * the with-content blur.
    */
   backgroundBlurContent?: number
+  /** Backdrop blur on the composer card while backdrop art is visible. */
+  inputCardBlur?: number
+  /** Message bubble opacity 0-100, consumed by skins that expose bubble alpha. */
+  bubbleOpacity?: number
 }
 
 /**
@@ -84,6 +119,8 @@ export const SkinBackgroundConfigSchema: z<SkinBackgroundConfig> = z.object({
   backgroundOpacity: z.number().min(0).max(100).step(5).default(0),
   backgroundBlurEmpty: z.number().min(0).max(20).step(1).default(0),
   backgroundBlurContent: z.number().min(0).max(20).step(1).default(0),
+  inputCardBlur: z.number().min(0).max(20).step(1).default(10),
+  bubbleOpacity: z.number().min(0).max(100).step(5).default(50),
 })
 
 /**
@@ -151,6 +188,15 @@ function applyImpl(ctx: Context): void {
     onChange: () => { /* browser half re-applies on scope publish */ },
   })
 
+  installSettingsSection(ctx, SKIN_CUSTOM_THEME_NAMESPACE, SkinCustomThemeConfigSchema, {
+    ...CUSTOM_THEME_DEFAULTS,
+    light: { ...CUSTOM_THEME_DEFAULTS.light },
+    dark: { ...CUSTOM_THEME_DEFAULTS.dark },
+  }, {
+    setSource: () => { /* application is browser-side; value is read from the scope */ },
+    onChange: () => { /* browser half re-applies on scope publish */ },
+  })
+
   // The wallpaper bridge namespace; the host side keeps a live getter so
   // the /we routes see weLibraryDirs changes without a restart.
   let wallpaperSource: () => SkinWallpaperConfig = () => ({})
@@ -171,13 +217,16 @@ function applyImpl(ctx: Context): void {
       const disposers: Array<() => void> = []
       try {
         for (const route of routes) disposers.push(ctx.webServer.register(route))
-        // The anti-FOUC seam (issue #506): stamp html[data-dsh-skin] and the
-        // stylesheet links into every served index.html. All tapIndex usage
-        // converges in the adapter; it fails closed to the stock look.
+        // The anti-FOUC seam (issue #506): contribute stylesheet links through
+        // DSH 0.1.1's structured table, then stamp html[data-dsh-skin] through
+        // the raw tap because the table cannot mutate the opening html tag.
         const statePath = defaultActiveStatePath()
-        disposers.push(ctx.webServer.tapIndex(makeSkinIndexTap({
-          readActiveId: () => readActiveSelection(statePath),
-        })))
+        const indexDeps = { readActiveId: () => readActiveSelection(statePath) }
+        const collectSkinRows = makeSkinIndexRows(indexDeps)
+        disposers.push(ctx.on('webserver/index-inject', (table) => {
+          table.push(...collectSkinRows())
+        }))
+        disposers.push(ctx.webServer.tapIndex(makeSkinIndexTap(indexDeps)))
       } catch (error) {
         // Roll back whatever registered before the failure so a partial
         // mount never leaves half a route family live; the outer catch logs.

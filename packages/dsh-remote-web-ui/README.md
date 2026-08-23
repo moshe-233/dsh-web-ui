@@ -44,7 +44,8 @@ that probes and runs the update.
   their next request. Pairing is this plugin's access control for its own
   remote channels: `/m/api` for the phone and `/remote` for a desktop
   browser opened at a non-loopback origin. Unpaired `/remote` callers
-  are refused before the request body is read. Loopback (127.0.0.1) keeps using
+  are refused before the request body is read while `requirePairingForLan` is
+  on (default). Loopback (127.0.0.1) keeps using
   `/api` directly. The default remote-desktop path does not use
   `--trusted-host`: the connection plugin's `/api` fence stays closed for
   public and LAN hosts, and the paired PC rides `/remote` instead.
@@ -65,7 +66,10 @@ that probes and runs the update.
   `/api/dsh-desktop-launcher/*` and `/api/dsh-web-ui-settings/*` control
   endpoints stay loopback-only. Unpaired desktop browsers get a persistent
   full-page block instead of data (the page keys off the `unpaired` error
-  code, not every 403).
+  code, not every 403). The block retires once a gated call succeeds or the
+  channel itself is torn down — turning `requirePairingForLan` off (or the
+  plugin off) also clears a notice raised while the channel was briefly
+  active.
 - **Posture probe**: the plugin probes the SDK `/api` fence with forged
   Host headers (the public base and every LAN base). A 403 is the default
   stance (fence closed; remote access goes through pairing). Anything other
@@ -241,12 +245,14 @@ over Server-Sent Events on `/m/api/events.mux`. The canonical `/m/` page owns a 
 - The `/m/` worker uses network-first static-shell fallback and waits for current pages to close before an updated worker activates. It bypasses `/m/api`, `/api`, SSE, and every write request.
 - Installing this plugin routes fenced non-loopback desktop traffic onto the
   gated `/remote` channel (see `requirePairingForLan` in `src/index.ts`).
-  A desktop browser opened via the LAN URL or the tunnel must pair like any
-  remote device — the unpaired state shows a persistent blocking page instead of
-  data; loopback (127.0.0.1) is unaffected and keeps `/api`. Set
-  `requirePairingForLan: false` in the profile patch to keep the desktop on
-  plain `/api` (only useful with the open-LAN stance) while keeping
-  tokens/status/revocation. Note the underlying `/api` route itself is the
+  While the flag is on (default), a desktop browser opened via the LAN URL or
+  the tunnel must pair like any remote device — the unpaired state shows a
+  persistent blocking page instead of data; loopback (127.0.0.1) is unaffected
+  and keeps `/api`. Set `requirePairingForLan: false` in the profile patch to
+  keep the desktop on plain `/api` and have a leftover `/remote` rewrite
+  proxy unpaired calls (only useful with the open-LAN stance; loopback-only
+  paths stay denied) while keeping tokens/status/revocation. Note the
+  underlying `/api` route itself is the
   SDK's: on a `--host 0.0.0.0` bind the SDK auto-trusts LAN literals, so a
   LAN client bypassing the UI can still reach `/api` directly — the posture
   probe reports that stance on the panel.
@@ -473,6 +479,10 @@ opens at `http://127.0.0.1`.
   unpair one at a time. Credential-bearing device ids and raw User-Agent
   values are not rendered. `/api/pair/status` never returns the device id
   list, even to a paired phone.
+- **The desktop gate policy is public**: `/api/pair/status` exposes only the
+  boolean `requirePairingForLan` policy so a remote desktop can choose the
+  correct transport before its settings scope is available. This field is
+  not a credential and does not expose tokens, devices, counts, or tunnel URLs.
 - **Quick-tunnel hostnames change per run**: a `trycloudflare.com` URL is
   random on every `cloudflared` start, so `publicBaseUrl` must be updated
   whenever the tunnel restarts. A named tunnel (fixed hostname) avoids the

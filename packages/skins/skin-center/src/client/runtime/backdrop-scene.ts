@@ -14,18 +14,18 @@
  * fade would hide it behind the input area, so the official mask is
  * neutralized uniformly for skins and wallpapers alike (issue #747 direction).
  *
- * Readability after the mask is gone comes from the input card itself
- * ([data-composer-card], the official shell's stable card anchor): the card
- * keeps its own translucent tint (--dsw-specific-* tokens, not a hardcoded
- * opacity) and gains a fixed backdrop blur (INPUT_FROST_BLUR_PX). The blur
- * occludes the backdrop art and any message content scrolling under the
- * input, so typed text never overlaps — a frosted pane instead of the older
- * flat mask. The frost is only enabled while the conversation actually has
- * message content (data-dsh-conversation-content): an empty conversation has
- * no正文 to occlude, so the input card keeps only its own translucent tint
- * and does not flash an extra blur patch (issue #777 follow-up).
- * The strength is a baked constant (not a slider) until the unified
- * dialog-blur control lands.
+ * Readability after the mask is gone comes from a shared frost limited to the
+ * input card itself ([data-composer-card], the official shell's stable card
+ * anchor). The wider composer seat stays transparent so the bottom mask does
+ * not cover the task strip or wallpaper outside the input control. The card
+ * keeps its own translucent tint and gains the configurable backdrop blur
+ * (default INPUT_FROST_BLUR_PX).
+ *
+ * The card rule is enabled only while the conversation actually has message
+ * content (data-dsh-conversation-content): an empty conversation has no正文 to
+ * occlude, so the input keeps its normal hero appearance without a frost flash.
+ * The strength is provided by --dsh-input-card-blur and falls back to the
+ * compatibility default when the setting has not loaded yet.
  *
  * The marker is body/html level (managed outside the surface/part/plugin
  * enum, see contracts/semantic-attrs-v1.md) and survives a neutralizer
@@ -42,10 +42,23 @@ export const SCENE_NEUTRALIZER_ATTR = 'data-dsh-scene-neutralizer'
 /** Conversation-content marker: set while the active conversation has rows. */
 export const CONVERSATION_CONTENT_ATTR = 'data-dsh-conversation-content'
 
+/**
+ * Stable shell scrollport scoped row selectors. Official builds emit the chat
+ * anchor; the CSS-module suffix fallbacks retain compatibility with older
+ * shells without returning to a body-wide topic/session query.
+ */
+const ACTIVE_CONVERSATION_CONTENT_SELECTOR = [
+  '[data-conversation-scroll] [data-chat-anchor-key]',
+  '[data-conversation-scroll] [class*="_userRow"]',
+  '[data-conversation-scroll] [class*="_compactionRow"]',
+  '[data-conversation-scroll] [class*="_contextRow"]',
+  '[data-conversation-scroll] [class*="_turnErrorRow"]',
+].join(', ')
+
 /** One source that can make backdrop art visible. */
 export type BackdropSource = 'skin' | 'wallpaper'
 
-/** Fixed input-card backdrop blur strength (px). Baked, not a slider yet. */
+/** Compatibility default for the input-card backdrop blur strength (px). */
 export const INPUT_FROST_BLUR_PX = 10
 
 const sourceSets = new WeakMap<Document, Set<BackdropSource>>()
@@ -82,9 +95,14 @@ function syncMarker(doc: Document, sources: Set<BackdropSource>): void {
   }
 }
 
-/** Track whether the active conversation has message rows for the frost gate. */
+/**
+ * Track whether the active conversation scrollport has message rows for the
+ * frost gate. Topic pickers and outgoing session trees can retain their own
+ * data-chat-anchor-key nodes during a switch; a body-wide query would count
+ * those stale rows and flash the composer frost over the new empty topic.
+ */
 function updateConversationContent(doc: Document): void {
-  const has = doc.body !== null && doc.body.querySelector('[data-chat-anchor-key]') !== null
+  const has = doc.body !== null && doc.body.querySelector(ACTIVE_CONVERSATION_CONTENT_SELECTOR) !== null
   if (has) {
     doc.body?.setAttribute(CONVERSATION_CONTENT_ATTR, 'true')
     doc.documentElement?.setAttribute(CONVERSATION_CONTENT_ATTR, 'true')
@@ -128,13 +146,15 @@ export function ensureSceneNeutralizer(doc: Document): void {
   const style = doc.createElement('style')
   style.setAttribute(SCENE_NEUTRALIZER_ATTR, '')
   style.textContent = `
+    html[data-dsh-backdrop-active] [data-composer-seat],
     html[data-dsh-backdrop-active] [data-composer-seat]::before {
       background: none !important;
       backdrop-filter: none !important;
+      -webkit-backdrop-filter: none !important;
     }
     html[data-dsh-backdrop-active][data-dsh-conversation-content] [data-composer-card] {
-      backdrop-filter: blur(${INPUT_FROST_BLUR_PX}px) !important;
-      -webkit-backdrop-filter: blur(${INPUT_FROST_BLUR_PX}px) !important;
+      backdrop-filter: blur(var(--dsh-input-card-blur, ${INPUT_FROST_BLUR_PX}px)) !important;
+      -webkit-backdrop-filter: blur(var(--dsh-input-card-blur, ${INPUT_FROST_BLUR_PX}px)) !important;
     }
   `
   doc.head.appendChild(style)

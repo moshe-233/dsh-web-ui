@@ -30,6 +30,7 @@
 import { cpSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { pipeline, type Readable } from 'node:stream'
 import { basename, dirname, extname, join as joinPath, resolve as resolvePath, sep } from 'node:path'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { json, readJsonBody, requireSameOrigin } from './http-utils.ts'
@@ -46,6 +47,7 @@ import {
   hasSceneVideo,
   hasSceneVideoFromDir,
   parseTexToRGBA,
+  TexUnsupportedError,
 } from './pkg-extract.ts'
 import { WE_SHIM_JS } from './we-shim-source.ts'
 import { WE_SCENE_PLAYER_HTML } from './we-player-source.ts'
@@ -167,6 +169,8 @@ export interface WeRouteDeps {
   storeDir: string
   /** Auto-detect Steam / Wallpaper Engine installation (default true). */
   autoDetect?: boolean
+  /** Internal stream factory override used by route-level lifecycle tests. */
+  openReadStream?: (path: string, options?: { start?: number; end?: number }) => Readable
 }
 
 /** Sanitize a wallpaper id into a safe store directory name. */
@@ -191,8 +195,42 @@ function mimeFor(absPath: string): string {
   }[ext] || 'application/octet-stream'
 }
 
+/** Pipe one file while coupling its descriptor lifetime to the HTTP response. */
+function pipeFile(
+  absPath: string,
+  res: ServerResponse,
+  openReadStream: NonNullable<WeRouteDeps['openReadStream']>,
+  options?: { start?: number; end?: number },
+): void {
+  if (res.destroyed || res.writableEnded) return
+
+  const source = openReadStream(absPath, options)
+  const closeSource = () => source.destroy()
+  res.once('close', closeSource)
+  if (res.destroyed || res.writableEnded) {
+    res.off('close', closeSource)
+    source.destroy()
+    return
+  }
+
+  try {
+    pipeline(source, res, () => {
+      res.off('close', closeSource)
+      // The callback consumes read and premature-close errors.
+    })
+  } catch {
+    res.off('close', closeSource)
+    source.destroy()
+  }
+}
+
 /** Stream one file with Range support (video seeking needs 206). */
-function serveFile(absPath: string, req: IncomingMessage, res: ServerResponse): void {
+function serveFile(
+  absPath: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+  openReadStream: NonNullable<WeRouteDeps['openReadStream']>,
+): void {
   if (!existsSync(absPath) || !statSync(absPath).isFile()) {
     json(res, 404, { ok: false, error: 'not-found' })
     return
@@ -216,11 +254,11 @@ function serveFile(absPath: string, req: IncomingMessage, res: ServerResponse): 
     res.statusCode = 206
     res.setHeader('Content-Range', 'bytes ' + String(start) + '-' + String(end) + '/' + String(size))
     res.setHeader('Content-Length', String(end - start + 1))
-    createReadStream(absPath, { start, end }).pipe(res)
+    pipeFile(absPath, res, openReadStream, { start, end })
     return
   }
   res.setHeader('Content-Length', String(size))
-  createReadStream(absPath).pipe(res)
+  pipeFile(absPath, res, openReadStream)
 }
 
 /** The JSON shape of one wallpaper entry sent to the browser. */
@@ -239,17 +277,30 @@ interface WallpaperJson {
 }
 
 /** Cached per-scene capability probe result. */
-interface SceneProbe { hasVideo: boolean; hasSceneWebGL: boolean }
+const SCENE_PROBE_VERSION = 3
+
+interface SceneProbe {
+  v: number
+  hasVideo: boolean
+  hasSceneWebGL: boolean
+  compatibility: 'full' | 'partial' | 'static-only'
+  unsupportedFeatures: string[]
+}
 
 /** Shape-check an entry loaded from the persisted probe cache. */
 function isSceneProbe(value: unknown): value is SceneProbe {
   return value !== null && typeof value === 'object'
+    && (value as SceneProbe).v === SCENE_PROBE_VERSION
     && typeof (value as SceneProbe).hasVideo === 'boolean'
     && typeof (value as SceneProbe).hasSceneWebGL === 'boolean'
+    && ((value as SceneProbe).compatibility === 'full' || (value as SceneProbe).compatibility === 'partial' || (value as SceneProbe).compatibility === 'static-only')
+    && Array.isArray((value as SceneProbe).unsupportedFeatures)
 }
 
 /** Build the route family. */
 export function makeWeRoutes(deps: WeRouteDeps): WebRoute[] {
+  const openReadStream = deps.openReadStream ?? createReadStream
+
   // token -> absolute path, issued by the inventory handler only. The map
   // is persisted under the import store cache so issued media URLs survive
   // host restarts without ever accepting a client-supplied path.
@@ -399,6 +450,8 @@ export function makeWeRoutes(deps: WeRouteDeps): WebRoute[] {
         if (!probe) {
           let hasVideo = false
           let hasSceneWebGL = false
+          let compatibility: SceneProbe['compatibility'] = 'full'
+          const unsupportedFeatures: string[] = []
           try {
             const pkgData = await readFile(entry.fileAbs)
             hasVideo = entry.fileAbs.toLowerCase().endsWith('.json')
@@ -408,12 +461,19 @@ export function makeWeRoutes(deps: WeRouteDeps): WebRoute[] {
               const manifest = entry.fileAbs.toLowerCase().endsWith('.json')
                 ? buildSceneManifestFromDir(dirname(entry.fileAbs), 'check')
                 : buildSceneManifest(pkgData, 'check')
+              if (manifest?.scripted) {
+                // Embedded scripts are ignored by the renderer, but the parsed
+                // layers remain safe to replay. Report partial compatibility
+                // without withholding water, particle and other supported passes.
+                compatibility = 'partial'
+                unsupportedFeatures.push('embedded-script')
+              }
               hasSceneWebGL = Boolean(manifest && ((manifest.layers && manifest.layers.length >= 1) || (manifest.is3D && manifest.models && manifest.models.length > 0)))
             }
           } catch {
             // probe failure: capabilities stay negative
           }
-          probe = { hasVideo, hasSceneWebGL }
+          probe = { v: SCENE_PROBE_VERSION, hasVideo, hasSceneWebGL, compatibility, unsupportedFeatures }
           if (mtimeMs > 0) {
             // Bound the cache by evicting the oldest entries instead of
             // clearing everything at once: the whole-map clear would make a
@@ -435,6 +495,8 @@ export function makeWeRoutes(deps: WeRouteDeps): WebRoute[] {
           ok: true,
           videoUrl: videoToken !== null ? WE_API_PREFIX + '/scene-video/' + videoToken : null,
           sceneUrl: sceneToken !== null ? WE_API_PREFIX + '/scene-runtime/' + sceneToken : null,
+          compatibility: probe.compatibility,
+          unsupportedFeatures: probe.unsupportedFeatures,
         })
       } catch (error) {
         json(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
@@ -478,7 +540,7 @@ export function makeWeRoutes(deps: WeRouteDeps): WebRoute[] {
             }
           } catch { /* fall through to serveFile */ }
         }
-        serveFile(abs, req, res)
+        serveFile(abs, req, res, openReadStream)
       },
     })
   }
@@ -513,7 +575,7 @@ export function makeWeRoutes(deps: WeRouteDeps): WebRoute[] {
           writeFileSync(cachePath, videoBytes)
           pruneStaleSceneCache(cacheDir, base, key)
         }
-        serveFile(cachePath, req, res)
+        serveFile(cachePath, req, res, openReadStream)
       })().catch((error: unknown) => {
         json(res, 422, { ok: false, error: error instanceof Error ? error.message : String(error) })
       })
@@ -557,7 +619,7 @@ export function makeWeRoutes(deps: WeRouteDeps): WebRoute[] {
         res.end(injected)
         return
       }
-      serveFile(abs, req, res)
+      serveFile(abs, req, res, openReadStream)
     },
   })
 
@@ -594,8 +656,22 @@ export function makeWeRoutes(deps: WeRouteDeps): WebRoute[] {
         }
         res.setHeader('Content-Type', 'image/png')
         res.setHeader('Cache-Control', 'no-store')
-        createReadStream(cachePath).pipe(res)
+        pipeFile(cachePath, res, openReadStream)
       })().catch((error: unknown) => {
+        if (error instanceof TexUnsupportedError) {
+          // Machine-readable signal for the client: the scene's textures use
+          // a format this build cannot decode, so the frame route reports it
+          // and the wallpaper controller falls back to the author preview
+          // (#906).
+          json(res, 422, {
+            ok: false,
+            error: 'unsupported-tex-format',
+            format: error.format,
+            formatName: error.formatName,
+            message: error.message,
+          })
+          return
+        }
         json(res, 422, { ok: false, error: error instanceof Error ? error.message : String(error) })
       })
     },

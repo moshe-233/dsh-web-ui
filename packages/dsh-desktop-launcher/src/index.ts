@@ -1,7 +1,7 @@
 /**
  * dsh-desktop-launcher — host half. Serves the loopback-only
  * /api/dsh-desktop-launcher/create route that writes the launcher script
- * under ~/.dsh/desktop-launcher/ and places a double-click icon on the
+ * under $DSH_HOME/desktop-launcher/ and places a double-click icon on the
  * Desktop (Windows .lnk, macOS .command, Linux .desktop), and the
  * loopback-only /api/dsh-desktop-launcher/shutdown route that requests the
  * host process to exit gracefully. Also provides a system-prompt
@@ -17,6 +17,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { DEFAULT_DSH_COMMAND, DEFAULT_URL, resolveLauncherSpec } from './core/launcher.ts'
 import { makeRoutes } from './routes.ts'
+import { LAUNCHER_TOKEN_ENV, makeLauncherLifecycleRoute } from './lifecycle-routes.ts'
 import { isLoopbackRequest, makeShutdownRoute } from './shutdown-routes.ts'
 import { mountOnce } from './mount-once.ts'
 
@@ -47,7 +48,7 @@ export const DESKTOP_LAUNCHER_SETTINGS_NAMESPACE = settingsNamespace('desktop-la
 export interface Config {
   /** When true (default), a system-prompt section announces the plugin. */
   announceToAgent?: boolean
-  /** Master switch for the plugin. */
+  /** Master switch for the plugin; off by default. */
   enabled?: boolean
   /** Command that starts dsh (must be on PATH when the launcher runs). */
   dshCommand?: string
@@ -62,8 +63,10 @@ export interface Config {
 }
 
 export const Config: z<Config> = z.object({
-  announceToAgent: z.boolean().default(true),
-  enabled: z.boolean().default(true),
+  announceToAgent: z.boolean().default(false),
+  // Off by default: the launcher surfaces (routes, announcement, floating
+  // shutdown button) mount only after the user enables the plugin.
+  enabled: z.boolean().default(false),
   dshCommand: z.string().default(DEFAULT_DSH_COMMAND),
   url: z.string().default(DEFAULT_URL),
   profile: z.string().default(''),
@@ -72,7 +75,7 @@ export const Config: z<Config> = z.object({
 })
 
 /** Schema default, re-read for hand-built test contexts (the loader applies them normally). */
-const DEFAULT_ANNOUNCE = true
+const DEFAULT_ANNOUNCE = false
 
 /** Order of the announcement section within the tool-guidance band. */
 const SECTION_ORDER = 210
@@ -92,7 +95,9 @@ function applyImpl(ctx: Context, config?: Config): void {
   let current: () => Config = () => config ?? {}
   let disposeRoutes: (() => void) | undefined
   let disposeShutdownRoute: (() => void) | undefined
+  let disposeLifecycleRoute: (() => void) | undefined
   let disposeSection: (() => void) | undefined
+  let managedToken = process.env[LAUNCHER_TOKEN_ENV]?.trim() || undefined
 
   /** Ask the launcher for a bounded exit; fall back to a direct exit. */
   const requestExit = (code: number): void => {
@@ -120,8 +125,13 @@ function applyImpl(ctx: Context, config?: Config): void {
       disposeShutdownRoute()
       disposeShutdownRoute = undefined
     }
+    if (disposeLifecycleRoute !== undefined) {
+      disposeLifecycleRoute()
+      disposeLifecycleRoute = undefined
+    }
     const value = current()
-    if ((value.enabled ?? true) === false) return
+    // The plugin is off unless the resolved config says otherwise.
+    if ((value.enabled ?? false) === false) return
     disposeRoutes = ctx.effect(
       () => {
         const disposers = makeRoutes({
@@ -131,6 +141,20 @@ function applyImpl(ctx: Context, config?: Config): void {
       },
       'dsh-desktop-launcher: routes',
     )
+    if (managedToken !== undefined) {
+      disposeLifecycleRoute = ctx.effect(() => {
+        const lifecycle = makeLauncherLifecycleRoute({
+          token: managedToken!,
+          requestExit,
+          fence: isLoopbackRequest,
+        })
+        const unregister = ctx.webServer.register(lifecycle.route)
+        return () => { unregister(); lifecycle.dispose() }
+      }, 'dsh-desktop-launcher: managed browser lifecycle')
+      // The inherited token only identifies the process instance that consumed it.
+      // Avoid exposing it to later route re-registration through a mutable environment.
+      managedToken = managedToken.trim()
+    }
     disposeShutdownRoute = ctx.effect(
       () => ctx.webServer.register(makeShutdownRoute({
         fence: isLoopbackRequest,

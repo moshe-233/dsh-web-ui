@@ -46,6 +46,27 @@ const WS_PATHS = new Set([
   '/api/dsh-ssh/terminal',
 ])
 
+/** Minimal settings snapshot used by the remote channel decision. */
+export interface RemoteChannelSettingsSnapshot {
+  status: 'ready' | 'loading' | 'unavailable' | string
+  value?: { enabled?: boolean; requirePairingForLan?: boolean }
+}
+
+/** Decide whether a remote desktop channel is required from local or host policy. */
+export function remoteChannelRequired(
+  hostname: string,
+  snapshot: RemoteChannelSettingsSnapshot,
+  hostPairingPolicy: boolean | undefined,
+): boolean {
+  if (isLoopbackHostname(hostname)) return false
+  if (snapshot.status === 'ready') {
+    return (snapshot.value?.enabled ?? true) && (snapshot.value?.requirePairingForLan ?? true)
+  }
+  // Install provisionally while the host probe is pending so early SDK calls
+  // cannot escape onto the plain remote origin. A confirmed false retires it.
+  return hostPairingPolicy !== false
+}
+
 /**
  * Browser-safe loopback classification for the page origin (the SDK client
  * exports its own; this copy keeps the module dependency-free).
@@ -266,4 +287,25 @@ export function installRemoteChannel(window: ChannelWindow, options: RemoteChann
     if (OriginalEventSource !== undefined) window.EventSource = OriginalEventSource
     for (const restore of restoreSrc) restore()
   }
+}
+
+/**
+ * The remote-channel lifecycle transition between two steady states:
+ * running (active + installed) and retired (inactive + not installed).
+ * The client apply drives the channel with this decision and retires the
+ * unpaired fence notice together with the channel itself — a notice raised
+ * while the channel was briefly active must not outlive it (issue #808).
+ */
+export type ChannelTransition = 'install' | 'retire' | 'none'
+
+/**
+ * Decide what the channel lifecycle must do next.
+ * @param active - whether the gated remote channel should be running now.
+ * @param installed - whether it currently is (disposer !== undefined).
+ * @returns the transition to apply.
+ */
+export function channelTransition(active: boolean, installed: boolean): ChannelTransition {
+  if (active && !installed) return 'install'
+  if (!active && installed) return 'retire'
+  return 'none'
 }

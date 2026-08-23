@@ -1,6 +1,6 @@
 /**
  * The /api/dsh-desktop-launcher route family: one POST that writes the
- * launcher script under ~/.dsh/desktop-launcher/ and places the double-click
+ * launcher script under $DSH_HOME/desktop-launcher/ and places the double-click
  * icon on the Desktop. Every route carries the same loopback-only trust
  * fence as the dsh-ssh routes — this endpoint writes files on the host
  * machine, so LAN-exposed dsh web deployments must not serve it.
@@ -12,6 +12,7 @@ import { chmod, copyFile, mkdir, writeFile } from 'node:fs/promises'
 import type { ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
+import { dshHome } from './dsh-home.ts'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
@@ -36,8 +37,10 @@ export type CommandRunner = (file: string, args: string[]) => Promise<CommandRes
 export interface LauncherRoutesDeps {
   /** Resolve the live launcher spec (composition + settings). */
   resolveSpec: () => LauncherSpec
-  /** Home directory (defaults to os.homedir()). */
+  /** Home directory (defaults to os.homedir()): the OS desktop the icon lands on. */
   homeDir?: string
+  /** DSH home directory for launcher assets (defaults to $DSH_HOME, then ~/.dsh). */
+  dshHomeDir?: string
   /** Host platform (defaults to process.platform). */
   platform?: string
   /** Command runner (defaults to child_process.execFile). */
@@ -126,7 +129,7 @@ async function probeDsh(platform: LauncherPlatform, run: CommandRunner, dshComma
   try {
     const result = platform === 'win32'
       ? await run('where', [dshCommand])
-      : await run('sh', ['-lc', `command -v ${dshCommand}`])
+      : await run('sh', ['-lc', 'command -v -- "$1"', 'dsh-desktop-launcher', dshCommand])
     return result.code === 0
   } catch {
     return false
@@ -144,7 +147,7 @@ export async function createDesktopShortcut(deps: LauncherRoutesDeps): Promise<C
   const platform = toLauncherPlatform(deps.platform ?? process.platform)
   const home = deps.homeDir ?? homedir()
   const run = deps.run ?? defaultRunner
-  const scriptsDir = join(home, '.dsh', 'desktop-launcher')
+  const scriptsDir = join(deps.dshHomeDir ?? dshHome(), 'desktop-launcher')
   await mkdir(scriptsDir, { recursive: true })
   const launcherPath = join(scriptsDir, scriptFileName(platform))
   // UTF-8 BOM: Windows PowerShell 5.1 misreads the Chinese popup text without it.
@@ -174,7 +177,9 @@ export async function createDesktopShortcut(deps: LauncherRoutesDeps): Promise<C
   if (!dshFound) warning = `dsh command "${spec.dshCommand}" was not found on PATH; the launcher shows a message when run`
   if (platform === 'win32') {
     const installerPath = join(scriptsDir, 'install-shortcut.ps1')
-    await writeFile(installerPath, renderShortcutInstaller({ launcherPath, desktopPath: iconPath, homeDir: home, iconLocation: iconIco ?? 'powershell.exe,0' }))
+    // The installer embeds user paths and may contain non-ASCII characters;
+    // Windows PowerShell 5.1 requires a BOM to decode it as UTF-8.
+    await writeFile(installerPath, '\uFEFF' + renderShortcutInstaller({ launcherPath, desktopPath: iconPath, homeDir: home, iconLocation: iconIco ?? 'powershell.exe,0' }))
     const result = await run('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', installerPath])
     if (result.code !== 0) throw new Error(`shortcut creation failed: ${result.stderr}`)
   } else if (platform === 'darwin') {

@@ -32,6 +32,10 @@ export type SkinCenterKey =
   | 'backgroundOpacity'
   | 'backgroundBlurEmpty'
   | 'backgroundBlurContent'
+  | 'inputCardBlur'
+  | 'inputCardBlurHint'
+  | 'bubbleOpacity'
+  | 'bubbleOpacityHint'
   | 'backgroundBlurHint'
   | 'backgroundBlurInert'
   | 'backgroundHint'
@@ -73,6 +77,20 @@ export type SkinCenterKey =
   | 'wallpaperDirsHint'
   | 'wallpaperDirPlaceholder'
   | 'wallpaperDirAdd'
+  | 'customThemeTitle'
+  | 'customThemeTagline'
+  | 'customThemeEdit'
+  | 'customThemeCloseEdit'
+  | 'customThemeMode'
+  | 'customThemeLight'
+  | 'customThemeDark'
+  | 'customThemeAccent'
+  | 'customThemeBackground'
+  | 'customThemeForeground'
+  | 'customThemeContrast'
+  | 'customThemeReset'
+  | 'customThemeResetHint'
+  | 'customThemeSaveFailed'
 
 export const en: Record<SkinCenterKey, string> = {
   title: 'Skin Center',
@@ -101,6 +119,10 @@ export const en: Record<SkinCenterKey, string> = {
   backgroundOpacity: 'Background occlusion',
   backgroundBlurEmpty: 'Blur when empty',
   backgroundBlurContent: 'Blur with content',
+  inputCardBlur: 'Input card blur',
+  inputCardBlurHint: 'Blurs only the area behind the input card while backdrop art is visible; it does not blur the entire wallpaper.',
+  bubbleOpacity: 'Bubble opacity',
+  bubbleOpacityHint: 'Controls translucent message bubbles for skins that expose bubble alpha, such as Whale Mom.',
   backgroundBlurHint: 'Applies a separate Gaussian blur to the backdrop for the empty conversation and the conversation with content; 0 disables.',
   backgroundBlurInert: 'Visible only with skins that paint a backdrop; the official default has none.',
   backgroundHint: 'Instantly veils the backdrop behind the panels — higher values obscure the art to help you focus.',
@@ -142,6 +164,20 @@ export const en: Record<SkinCenterKey, string> = {
   wallpaperDirsHint: 'No Wallpaper Engine (e.g. macOS)? Point a folder at any .mp4/.webm files, a wallpaper project folder, or a folder of projects — they become your wallpaper library.',
   wallpaperDirPlaceholder: '/path/to/wallpapers or ~/Movies/wallpapers',
   wallpaperDirAdd: 'Add',
+  customThemeTitle: 'Custom theme',
+  customThemeTagline: 'A separately saved palette derived from the official default theme.',
+  customThemeEdit: 'Edit',
+  customThemeCloseEdit: 'Collapse',
+  customThemeMode: 'Editing mode',
+  customThemeLight: 'Light',
+  customThemeDark: 'Dark',
+  customThemeAccent: 'Accent',
+  customThemeBackground: 'Background',
+  customThemeForeground: 'Foreground',
+  customThemeContrast: 'Contrast',
+  customThemeReset: 'Restore current mode default',
+  customThemeResetHint: 'Only resets the selected light or dark profile.',
+  customThemeSaveFailed: 'Could not save custom theme changes.',
 }
 
 export const zh: Record<SkinCenterKey, string> = {
@@ -171,6 +207,10 @@ export const zh: Record<SkinCenterKey, string> = {
   backgroundOpacity: '背景遮挡',
   backgroundBlurEmpty: '空对话背景模糊',
   backgroundBlurContent: '有对话背景模糊',
+  inputCardBlur: '输入卡模糊',
+  inputCardBlurHint: '仅模糊输入卡背后的区域，不会让整张壁纸变糊。',
+  bubbleOpacity: '气泡不透明度',
+  bubbleOpacityHint: '调节支持气泡 alpha 的皮肤消息气泡，例如鲸鱼妈妈。',
   backgroundBlurHint: '对话为空与有内容时分别应用不同的背景高斯模糊强度，0 为关闭。',
   backgroundBlurInert: '仅对带背景图插画的皮肤可见；官方默认无背景图。',
   backgroundHint: '即时为面板背后的背景加遮罩——数值越高越能弱化插画，帮你集中注意力。',
@@ -212,4 +252,18 @@ export const zh: Record<SkinCenterKey, string> = {
   wallpaperDirsHint: '没有 Wallpaper Engine（如 macOS）？把任意 .mp4/.webm 视频、单个壁纸项目文件夹或项目合集文件夹加进来，就是你的壁纸库。',
   wallpaperDirPlaceholder: '/path/to/wallpapers 或 ~/Movies/wallpapers',
   wallpaperDirAdd: '添加',
+  customThemeTitle: '自定义主题',
+  customThemeTagline: '基于官方默认主题生成并独立保存的配色方案。',
+  customThemeEdit: '编辑',
+  customThemeCloseEdit: '收起',
+  customThemeMode: '编辑模式',
+  customThemeLight: '浅色',
+  customThemeDark: '深色',
+  customThemeAccent: '强调色',
+  customThemeBackground: '背景色',
+  customThemeForeground: '前景色',
+  customThemeContrast: '对比度',
+  customThemeReset: '恢复当前模式默认',
+  customThemeResetHint: '只重置当前选择的浅色或深色配置。',
+  customThemeSaveFailed: '自定义主题修改保存失败。',
 }

@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { AddressInfo } from 'node:net'
+import { Readable } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFile } from 'node:fs/promises'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
@@ -61,6 +62,26 @@ const tex64Red = ((): Buffer => {
     ...nstr('TEXB0002'), ...i32(1),
     ...i32(1), ...i32(64), ...i32(64),
     ...i32(0), ...i32(px), ...i32(px), ...pixels,
+  ])
+})()
+
+/** Minimal 4x4 BC7 TEX (recognized format with no decoder here) for
+ *  unsupported-format scene-frame tests (#906). */
+const texBc7 = ((): Buffer => {
+  const enc = new TextEncoder()
+  const nstr = (s: string): number[] => [...enc.encode(s), 0]
+  const i32 = (v: number): number[] => {
+    const b = new DataView(new ArrayBuffer(4))
+    b.setInt32(0, v, true)
+    return [...new Uint8Array(b.buffer)]
+  }
+  return Buffer.from([
+    ...nstr('TEXV0005'), ...nstr('TEXI0001'),
+    ...i32(TexFormat.BC7), ...i32(0),
+    ...i32(4), ...i32(4), ...i32(4), ...i32(4), ...i32(0),
+    ...nstr('TEXB0002'), ...i32(1),
+    ...i32(1), ...i32(4), ...i32(4),
+    ...i32(0), ...i32(16), ...i32(16), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
   ])
 })()
 
@@ -206,6 +227,139 @@ describe('media and preview', () => {
     expect(String(partial.headers['content-range'])).toContain('bytes 0-3/')
   })
 
+  it('destroys the source stream when the client disconnects', async () => {
+    const inventory = await call('GET', WE_API_PREFIX + '/inventory')
+    const video = (inventory.body.wallpapers as Array<Record<string, unknown>>).find(w => w.id === '111')
+    expect(String(video?.videoUrl)).toContain(WE_API_PREFIX + '/media/')
+    await new Promise<void>((resolve, reject) => server.close(e => (e ? reject(e) : resolve())))
+
+    let source: Readable | undefined
+    let sent = false
+    const routes = makeWeRoutes({
+      getConfig: () => ({ weLibraryDirs: [library] }),
+      storeDir: store,
+      autoDetect: false,
+      openReadStream: () => {
+        source = new Readable({
+          read() {
+            if (!sent) {
+              sent = true
+              this.push(Buffer.from('x'))
+            }
+          },
+        })
+        return source
+      },
+    })
+    await serve(routes)
+
+    await new Promise<void>((resolve, reject) => {
+      const req = httpRequest({ host: '127.0.0.1', port, path: String(video?.videoUrl), method: 'GET' }, (response) => {
+        response.once('data', () => response.destroy())
+        response.once('close', resolve)
+        response.once('error', reject)
+      })
+      req.once('error', reject)
+      req.end()
+    })
+    if (!source?.destroyed) {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('source stream stayed open after disconnect')), 1000)
+        source?.once('close', () => {
+          clearTimeout(timeout)
+          resolve()
+        })
+      })
+    }
+
+    expect(source?.destroyed).toBe(true)
+  })
+
+  it('contains source stream errors and keeps the server responsive', async () => {
+    const inventory = await call('GET', WE_API_PREFIX + '/inventory')
+    const video = (inventory.body.wallpapers as Array<Record<string, unknown>>).find(w => w.id === '111')
+    expect(String(video?.videoUrl)).toContain(WE_API_PREFIX + '/media/')
+    await new Promise<void>((resolve, reject) => server.close(e => (e ? reject(e) : resolve())))
+
+    let openCalls = 0
+    const routes = makeWeRoutes({
+      getConfig: () => ({ weLibraryDirs: [library] }),
+      storeDir: store,
+      autoDetect: false,
+      openReadStream: () => {
+        openCalls++
+        return new Readable({
+          read() { this.destroy(new Error('synthetic-read-failure')) },
+        })
+      },
+    })
+    await serve(routes)
+
+    const outcome = await new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('stream error did not close the response')), 1000)
+      const settle = (value: string) => {
+        clearTimeout(timeout)
+        resolve(value)
+      }
+      const req = httpRequest({ host: '127.0.0.1', port, path: String(video?.videoUrl), method: 'GET' }, (response) => {
+        response.resume()
+        response.once('aborted', () => settle('response-aborted'))
+        response.once('close', () => settle('response-closed'))
+        response.once('error', () => settle('response-error'))
+      })
+      req.once('error', () => settle('request-error'))
+      req.end()
+    })
+
+    expect(openCalls).toBe(1)
+    expect(['response-aborted', 'response-closed', 'response-error', 'request-error']).toContain(outcome)
+    expect((await call('GET', WE_API_PREFIX + '/inventory')).status).toBe(200)
+  })
+
+  it('does not open a source after the response has already closed', async () => {
+    const inventory = await call('GET', WE_API_PREFIX + '/inventory')
+    const video = (inventory.body.wallpapers as Array<Record<string, unknown>>).find(w => w.id === '111')
+    expect(String(video?.videoUrl)).toContain(WE_API_PREFIX + '/media/')
+    await new Promise<void>((resolve, reject) => server.close(e => (e ? reject(e) : resolve())))
+
+    let openCalls = 0
+    const routes = makeWeRoutes({
+      getConfig: () => ({ weLibraryDirs: [library] }),
+      storeDir: store,
+      autoDetect: false,
+      openReadStream: () => {
+        openCalls++
+        return Readable.from('unused')
+      },
+    })
+    let handled!: () => void
+    const handlerDone = new Promise<void>(resolve => { handled = resolve })
+    server = createServer((request, response) => {
+      const pathname = new URL(request.url ?? '/', 'http://x').pathname
+      const route = routes.find(r => r.kind === 'exact'
+        ? r.path === pathname
+        : pathname === r.path || pathname.startsWith(r.path + '/'))
+      response.destroy()
+      setImmediate(() => {
+        if (route !== undefined) void route.handler(request, response)
+        handled()
+      })
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    port = (server.address() as AddressInfo).port
+
+    await Promise.all([
+      handlerDone,
+      new Promise<void>(resolve => {
+        const req = httpRequest({ host: '127.0.0.1', port, path: String(video?.videoUrl), method: 'GET' })
+        req.once('error', () => resolve())
+        req.end()
+      }),
+    ])
+
+    expect(openCalls).toBe(0)
+  })
+
   it('404s on unknown tokens', async () => {
     const res = await call('GET', WE_API_PREFIX + '/media/bm9wZXJl')
     expect(res.status).toBe(404)
@@ -281,6 +435,19 @@ describe('scene-frame', () => {
     const res = await call('GET', String(scene?.frameUrl))
     expect(res.status).toBe(422)
     expect(res.body.ok).toBe(false)
+  })
+
+  it('answers a structured unsupported-tex-format 422 for BC7-only scenes (#906)', async () => {
+    makeProject(join(library, '999'), { title: 'BC7Scene', type: 'scene', file: 'scene.json' }, {
+      'scene.json': JSON.stringify({ objects: [{ image: 'materials/art.tex' }] }),
+    })
+    mkdirSync(join(library, '999', 'materials'), { recursive: true })
+    writeFileSync(join(library, '999', 'materials', 'art.tex'), texBc7)
+    const inventory = await call('GET', WE_API_PREFIX + '/inventory')
+    const scene = (inventory.body.wallpapers as Array<Record<string, unknown>>).find(w => w.id === '999')
+    const res = await call('GET', String(scene?.frameUrl))
+    expect(res.status).toBe(422)
+    expect(res.body).toMatchObject({ ok: false, error: 'unsupported-tex-format', format: 12, formatName: 'BC7' })
   })
 })
 
@@ -411,6 +578,44 @@ describe('scene container resolution (#521)', () => {
     expect(resRes.status).toBe(200)
     expect(String(resRes.headers['content-type'])).toContain('image/png')
   })
+
+  it('keeps supported water and particle passes live when embedded scripts are ignored', async () => {
+    makeProject(join(library, '777'), { title: 'Scripted water and meteors', type: 'scene', file: 'scene.json' }, {
+      'scene.json': JSON.stringify({
+        general: { orthogonalprojection: { width: 1000, height: 800 } },
+        objects: [
+          {
+            name: 'water',
+            image: 'models/water.json',
+            origin: '500 400 0',
+            effects: [{
+              file: 'effects/reflection/effect.json',
+              overrides: [{ visible: { value: false, script: 'engine.registerAsset(1)' } }],
+            }],
+          },
+          { name: 'meteor emitter' },
+        ],
+      }),
+      'models/water.json': JSON.stringify({ material: 'materials/water.json', width: 64, height: 64 }),
+      'materials/water.json': JSON.stringify({ passes: [{ textures: ['materials/water.tex'] }] }),
+    })
+    mkdirSync(join(library, '777', 'materials'), { recursive: true })
+    writeFileSync(join(library, '777', 'materials', 'water.tex'), tex64Red)
+    writeFileSync(join(library, '777', 'materials', 'reflection_mask.tex'), tex1x1Red)
+    const probe = await call('GET', WE_API_PREFIX + '/scene-probe?id=777')
+    expect(probe.status).toBe(200)
+    expect(String(probe.body.sceneUrl)).toContain(WE_API_PREFIX + '/scene-runtime/')
+    expect(probe.body.compatibility).toBe('partial')
+    expect(probe.body.unsupportedFeatures).toEqual(['embedded-script'])
+
+    const manifestResponse = await call('GET', String(probe.body.sceneUrl).replace('/scene-runtime/', '/scene-manifest/'))
+    const manifest = manifestResponse.body.manifest as Record<string, unknown>
+    const layers = manifest.layers as Array<Record<string, unknown>>
+    expect(manifest.scripted).toBe(true)
+    expect(manifest.hasMeteors).toBe(true)
+    expect(layers.some(layer => layer.isReflection === true && typeof layer.waterLine === 'number')).toBe(true)
+    expect(layers.some(layer => layer.name === 'water' && layer.isReflection !== true)).toBe(true)
+  })
 })
 
 describe('import lifecycle', () => {
@@ -482,7 +687,13 @@ describe('scene-probe cache (#817)', () => {
     const persisted = JSON.parse(readFileSync(persistedPath, 'utf8')) as Record<string, unknown>
     const key = Object.keys(persisted)[0] ?? ''
     expect(key).toContain('scene.pkg')
-    expect(persisted[key]).toEqual({ hasVideo: false, hasSceneWebGL: false })
+    expect(persisted[key]).toEqual({
+      v: 3,
+      hasVideo: false,
+      hasSceneWebGL: false,
+      compatibility: 'full',
+      unsupportedFeatures: [],
+    })
 
     // Simulate a host restart: a fresh route family must serve the same
     // result from the persisted cache without re-reading the payload.
@@ -524,7 +735,7 @@ describe('scene-probe cache (#817)', () => {
     const persisted = JSON.parse(
       readFileSync(join(store, '.cache', 'we-scene-probes.json'), 'utf8',
     )) as Record<string, unknown>
-    const keys = Object.keys(persisted)
+    const keys = Object.keys(persisted).map(key => key.replaceAll('\\', '/'))
     expect(keys.length).toBe(256)
     expect(keys.filter(k => k.includes('/s000/') || k.includes('/s001/'))).toHaveLength(0)
     expect(keys.some(k => k.includes('/s257/'))).toBe(true)

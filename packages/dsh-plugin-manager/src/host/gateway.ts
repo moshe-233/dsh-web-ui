@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { join, win32 } from 'node:path'
+import { join, posix, win32 } from 'node:path'
 import type { InstalledPluginItem } from '../core/protocol.ts'
 import type { ControlChange } from '../core/conflict.ts'
 import { diffLayer, overlappingIds, significantChanges, type LayerChange, type LayerSnapshot } from '../core/patch-diff.ts'
@@ -34,7 +34,7 @@ const MAX_OUTPUT_CHARS = 32_000
  * pnpm with a cmd.exe shell on Windows, so a spec carrying these can still be
  * re-parsed one layer down (a failed install reported as success, or worse).
  */
-const UNSAFE_SPEC_CHARS = /[&|<>"'`\n\r\0]/
+const UNSAFE_SPEC_CHARS = /[&|<>"'`%!\n\r\0]/
 
 /**
  * Validate an install spec or package id against shell metacharacters.
@@ -43,7 +43,7 @@ const UNSAFE_SPEC_CHARS = /[&|<>"'`\n\r\0]/
  */
 export function unsafeSpecReason(spec: string): string | undefined {
   return UNSAFE_SPEC_CHARS.test(spec)
-    ? 'plugin-manager: spec 含有危险的 shell 元字符（& | < > 引号 反引号或控制字符），已拒绝'
+    ? 'plugin-manager: spec 含有危险的 shell 元字符或控制字符，已拒绝'
     : undefined
 }
 
@@ -78,15 +78,31 @@ export function findDshBinary(
   env: NodeJS.ProcessEnv = process.env,
   platform: string = process.platform,
   exists: (path: string) => boolean = existsSync,
+  hostEntryPath: string | undefined = process.argv[1],
 ): string | null {
   const candidates: string[] = []
   const separator = platform === 'win32' ? ';' : ':'
+  const pathApi = platform === 'win32' ? win32 : posix
   for (const dir of (env.PATH ?? '').split(separator)) {
     if (dir === '') continue
     if (platform === 'win32') {
       candidates.push(`${dir}\\dsh.cmd`, `${dir}\\dsh.exe`)
     } else {
       candidates.push(`${dir}/dsh`)
+    }
+  }
+  // A local wrapper or npx launch may omit its node_modules/.bin directory
+  // from PATH. Walk up from the actual host entry script and probe each npm
+  // project root without guessing from the DSH_HOME profile location.
+  if (hostEntryPath !== undefined && hostEntryPath !== '') {
+    let current = pathApi.dirname(hostEntryPath)
+    for (let depth = 0; depth < 10; depth += 1) {
+      const binDir = pathApi.join(current, 'node_modules', '.bin')
+      if (platform === 'win32') candidates.push(pathApi.join(binDir, 'dsh.cmd'), pathApi.join(binDir, 'dsh.exe'))
+      else candidates.push(pathApi.join(binDir, 'dsh'))
+      const parent = pathApi.dirname(current)
+      if (parent === current) break
+      current = parent
     }
   }
   if (platform === 'darwin') {
@@ -133,15 +149,33 @@ export function dshSpawnCommand(
     win32.join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
     win32.join(dir, '..', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
   ]
-  const binJs = binJsCandidates.find((candidate) => binJsExists(candidate)) ?? binJsCandidates[0]
+  const binJs = binJsCandidates.find((candidate) => binJsExists(candidate))
+  if (binJs === undefined) return { command: binary, argsPrefix: [] }
   return { command: localNodeExists(localNode) ? localNode : process.execPath, argsPrefix: [binJs] }
+}
+
+/** Build the exact cmd.exe command line required to execute a trusted .cmd shim. */
+export function windowsCmdShimArgs(binary: string, args: readonly string[]): string[] {
+  const unsafe = /[&|<>"'`%!\n\r\0]/
+  if (/["%\n\r\0]/.test(binary) || args.some(arg => unsafe.test(arg))) {
+    throw new Error('plugin-manager: unsafe Windows command argument')
+  }
+  const commandLine = `""${binary}" ${args.map(arg => `"${arg}"`).join(' ')}"`
+  return ['/d', '/s', '/c', commandLine]
 }
 
 /** Spawn the dsh CLI with piped stdio and no shell parsing (see {@link dshSpawnCommand}). */
 export function spawnDsh(binary: string, args: string[], env: NodeJS.ProcessEnv) {
   const { command, argsPrefix } = dshSpawnCommand(binary)
+  if (process.platform === 'win32' && command.toLowerCase().endsWith('.cmd')) {
+    return spawn('cmd.exe', windowsCmdShimArgs(command, args), {
+      env,
+      windowsVerbatimArguments: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  }
   return spawn(command, [...argsPrefix, ...args], {
-    env,
+    env: command === process.execPath ? { ...env, ELECTRON_RUN_AS_NODE: '1' } : env,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
 }

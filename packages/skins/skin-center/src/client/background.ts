@@ -37,11 +37,26 @@ export const BLUR_EMPTY_FIELD = 'backgroundBlurEmpty'
 /** Field of the with-content backdrop blur inside the namespace section. */
 export const BLUR_CONTENT_FIELD = 'backgroundBlurContent'
 
+/** Field of the composer card backdrop blur inside the namespace section. */
+export const INPUT_CARD_BLUR_FIELD = 'inputCardBlur'
+
 /** CSS custom property written to document.body and read by backdrop skins. */
 export const SCRIM_VAR = '--dsw-skin-scrim'
 
+/** Field of the message bubble opacity inside the namespace section. */
+export const BUBBLE_OPACITY_FIELD = 'bubbleOpacity'
+
+/** CSS custom property consumed by skins that expose translucent bubbles. */
+export const BUBBLE_ALPHA_VAR = '--dsh-skin-bubble-alpha'
+
+/** CSS custom property consumed by the shared composer neutralizer. */
+export const INPUT_CARD_BLUR_VAR = '--dsh-input-card-blur'
+
 /** Default occlusion (0 = no extra veil) when the section carries none. */
 export const DEFAULT_OPACITY = 0
+
+/** Default message bubble opacity percentage. */
+export const DEFAULT_BUBBLE_OPACITY = 50
 
 /** Default blur (0 = disabled) when the section carries none. */
 export const DEFAULT_BLUR = 0
@@ -58,6 +73,10 @@ export interface SkinBackgroundHandle {
   blurEmpty(): number
   /** Current with-content backdrop blur 0-20 px. */
   blurContent(): number
+  /** Current input-card backdrop blur 0-20 px. */
+  inputCardBlur(): number
+  /** Current message bubble opacity 0-100. */
+  bubbleOpacity(): number
   /** Observe a change in the applied values. */
   subscribe(listener: () => void): () => void
   /** Apply + persist a new occlusion. */
@@ -66,6 +85,10 @@ export interface SkinBackgroundHandle {
   setBlurEmpty(value: number): void
   /** Apply + persist a new with-content backdrop blur (0-20 px). */
   setBlurContent(value: number): void
+  /** Apply + persist a new input-card backdrop blur (0-20 px). */
+  setInputCardBlur(value: number): void
+  /** Apply + persist a new message bubble opacity (0-100). */
+  setBubbleOpacity(value: number): void
   /** Tear down the blur element and MutationObserver. */
   dispose(): void
 }
@@ -96,12 +119,16 @@ export class BackgroundController implements SkinBackgroundHandle {
   private opacityValue = DEFAULT_OPACITY
   private blurEmptyValue = DEFAULT_BLUR
   private blurContentValue = DEFAULT_BLUR
+  private inputCardBlurValue = 10
+  private bubbleOpacityValue = DEFAULT_BUBBLE_OPACITY
   private readonly listeners = new Set<() => void>()
   private readonly scope: SettingsScope<{
     enabled?: boolean
     backgroundOpacity?: number
     backgroundBlurEmpty?: number
     backgroundBlurContent?: number
+    inputCardBlur?: number
+    bubbleOpacity?: number
   }>
   /** The fixed backdrop-filter element, present only while active blur > 0. */
   private blurElement: HTMLDivElement | null = null
@@ -120,20 +147,30 @@ export class BackgroundController implements SkinBackgroundHandle {
     backgroundOpacity?: number
     backgroundBlurEmpty?: number
     backgroundBlurContent?: number
+    inputCardBlur?: number
+    bubbleOpacity?: number
   }>) {
     this.scope = scope
     this.enabledValue = this.readEnabled()
     this.opacityValue = this.readOpacity()
     this.blurEmptyValue = this.readBlur(BLUR_EMPTY_FIELD)
     this.blurContentValue = this.readBlur(BLUR_CONTENT_FIELD)
+    this.inputCardBlurValue = this.readInputCardBlur()
+    this.bubbleOpacityValue = this.readBubbleOpacity()
     this.applyOcclusion()
+    this.applyInputCardBlur()
+    this.applyBubbleOpacity()
     this.syncBlur()
     scope.subscribe(() => {
       this.enabledValue = this.readEnabled()
       this.opacityValue = this.readOpacity()
       this.blurEmptyValue = this.readBlur(BLUR_EMPTY_FIELD)
       this.blurContentValue = this.readBlur(BLUR_CONTENT_FIELD)
+      this.inputCardBlurValue = this.readInputCardBlur()
+      this.bubbleOpacityValue = this.readBubbleOpacity()
       this.applyOcclusion()
+      this.applyInputCardBlur()
+      this.applyBubbleOpacity()
       this.syncBlur()
       this.publish()
     })
@@ -144,6 +181,7 @@ export class BackgroundController implements SkinBackgroundHandle {
   setEnabled(value: boolean): void {
     this.enabledValue = value
     this.applyOcclusion()
+    this.applyInputCardBlur()
     this.syncBlur()
     this.publish()
     void this.scope.set('enabled', value)
@@ -154,6 +192,10 @@ export class BackgroundController implements SkinBackgroundHandle {
   blurEmpty = (): number => this.blurEmptyValue
 
   blurContent = (): number => this.blurContentValue
+
+  inputCardBlur = (): number => this.inputCardBlurValue
+
+  bubbleOpacity = (): number => this.bubbleOpacityValue
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener)
@@ -188,6 +230,22 @@ export class BackgroundController implements SkinBackgroundHandle {
     void this.scope.set(BLUR_CONTENT_FIELD, clamped)
   }
 
+  setInputCardBlur(value: number): void {
+    const clamped = this.clampBlur(value)
+    this.inputCardBlurValue = clamped
+    this.applyInputCardBlur()
+    this.publish()
+    void this.scope.set(INPUT_CARD_BLUR_FIELD, clamped)
+  }
+
+  setBubbleOpacity(value: number): void {
+    const clamped = this.clampPercent(value)
+    this.bubbleOpacityValue = clamped
+    this.applyBubbleOpacity()
+    this.publish()
+    void this.scope.set(BUBBLE_OPACITY_FIELD, clamped)
+  }
+
   dispose(): void {
     this.disposed = true
     if (this.rafId !== null) {
@@ -195,6 +253,8 @@ export class BackgroundController implements SkinBackgroundHandle {
       this.rafId = null
     }
     this.removeBlurElement()
+    document.body.style.removeProperty(INPUT_CARD_BLUR_VAR)
+    document.body.style.removeProperty(BUBBLE_ALPHA_VAR)
     if (this.observer !== null) {
       this.observer.disconnect()
       this.observer = null
@@ -216,6 +276,20 @@ export class BackgroundController implements SkinBackgroundHandle {
     return Math.max(0, Math.min(100, raw))
   }
 
+  private readInputCardBlur(): number {
+    const snapshot: SettingsScopeSnapshot<{ inputCardBlur?: number }> = this.scope.getSnapshot()
+    const raw = snapshot.value?.inputCardBlur
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) return 10
+    return this.clampBlur(raw)
+  }
+
+  private readBubbleOpacity(): number {
+    const snapshot: SettingsScopeSnapshot<{ bubbleOpacity?: number }> = this.scope.getSnapshot()
+    const raw = snapshot.value?.bubbleOpacity
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_BUBBLE_OPACITY
+    return this.clampPercent(raw)
+  }
+
   /** The effective blur section value for one field, clamped 0-20, defaulting to 0. */
   private readBlur(field: 'backgroundBlurEmpty' | 'backgroundBlurContent'): number {
     const snapshot: SettingsScopeSnapshot<{
@@ -229,6 +303,26 @@ export class BackgroundController implements SkinBackgroundHandle {
 
   private clampBlur(value: number): number {
     return Math.max(0, Math.min(20, Math.round(value)))
+  }
+
+  private clampPercent(value: number): number {
+    return Math.max(0, Math.min(100, Math.round(value)))
+  }
+
+  private applyInputCardBlur(): void {
+    if (!this.enabledValue) {
+      document.body.style.removeProperty(INPUT_CARD_BLUR_VAR)
+      return
+    }
+    document.body.style.setProperty(INPUT_CARD_BLUR_VAR, this.inputCardBlurValue + 'px')
+  }
+
+  private applyBubbleOpacity(): void {
+    if (!this.enabledValue) {
+      document.body.style.removeProperty(BUBBLE_ALPHA_VAR)
+      return
+    }
+    document.body.style.setProperty(BUBBLE_ALPHA_VAR, String(this.bubbleOpacityValue / 100))
   }
 
   /** Write the current occlusion onto the body CSS variable (0..1 alpha). */

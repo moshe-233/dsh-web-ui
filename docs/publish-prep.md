@@ -26,6 +26,7 @@
 | packages/dsh-plugin-manager | @linxin666/dsh-client-ui-plugin-manager | 0.1.0 | true |
 | packages/dsh-chat-recovery | @linxin666/dsh-chat-recovery | 0.2.4 | false |
 | packages/dsh-desktop-launcher | @linxin666/dsh-desktop-launcher | 0.2.3 | false |
+| packages/dsh-doctor | @linxin666/dsh-doctor | 0.2.7 | false |
 | packages/dsh-skins | @linxin666/dsh-skins（聚合） | 0.1.1 | true |
 | packages/dsh-web-ui-all | @linxin666/dsh-web-ui-all（聚合） | 0.1.1 | true |
 | packages/skins/skin-center | @linxin666/dsh-client-ui-skin-center | 0.1.1 | true |
@@ -79,6 +80,8 @@ npm 版 `@deepseek-ai/dsh@0.1.0-rc.6`：
 
 npm 侧已发布 @deepseek-ai 核心 SDK 包至 `0.1.0-rc.6`，插件包仍按本仓库版本管理。
 
+从 2026-08-21 起（issue #754），家族包在 `dsh.engines.dsh` 声明最低 DSH 运行时（当前 `>=0.1.1-rc.1`），插件管理器据此在更新时提示并拦截不兼容版本。**发布约束**：SDK cohort 升级后，若新合同需要更高 DSH 运行时，必须在同一发布里同步提升所有家族包（`packages/` 与 `packages/skins/`）及 `scripts/plugin-template/package.json` 的 `dsh.engines.dsh`，并确保 `scripts/family-dsh-engines.test.mjs`（形式校验）与 `pnpm docs:check` 通过；不允许只升代码不升声明。
+
 ## 四、建议的发布流程（批准后执行）
 
 1. 同步官方版本号节奏（当前为 `0.1.0-rc.6`，与 @deepseek-ai/dsh 对齐）；
@@ -86,8 +89,8 @@ npm 侧已发布 @deepseek-ai 核心 SDK 包至 `0.1.0-rc.6`，插件包仍按�
 3. 按依赖顺序发布（用 **`pnpm publish`**，自动改写 workspace:*）：
    各功能包 > skin-center > dsh-skins > web-ui-all；
 4. **外部依赖先行**：web-ui-all 的 dependencies 含 `dsh-better-sidebar`（0.14.0，
-   非本仓库出品，已发布并适配 rc.8 官方 SDK cohort），其版本必须已在 npm 上可解析，
-   再更新 lockfile；
+   非本仓库出品，已发布并适配 rc.8 官方 SDK cohort）与 `@mlgbnb/dsh-archive-manager`
+   （1.0.7，社区插件，已发布），其版本必须已在 npm 上可解析，再更新 lockfile；
 5. 逐包 `pnpm pack --dry-run` 复核 tarball 内容（注意：dry-run 仍会执行
    prepack/prepare 脚本）；
 6. 发布动作前**必须**经维护者确认。

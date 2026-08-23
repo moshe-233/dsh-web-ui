@@ -11,7 +11,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { isLoopbackRequest } from './loopback.ts'
-import { detectOfficialChannels, findDshBinary, unsafeSpecReason, type CliGateway } from './gateway.ts'
+import { detectOfficialChannels, findDshBinary, spawnDsh, unsafeSpecReason, type CliGateway } from './gateway.ts'
+import { dshRequirementOf, meetsMinimumDsh, parseDshVersion } from '../core/version.ts'
 import { readPatchText, readProfileManifest, type ProfileFacts } from './profile.ts'
 import { setRowEnabled, writePatchAtomic } from './rows.ts'
 import { buildPluginRow, claimedEntryRowsOf, snapshotGateway } from './state.ts'
@@ -25,14 +26,32 @@ const MAX_JSON_BODY_BYTES = 64 * 1024
 /** Registry timeout for one update check. */
 const REGISTRY_TIMEOUT_MS = 30_000
 
+/** Deadline for one dsh --version probe. */
+const VERSION_TIMEOUT_MS = 10_000
+
+/** Bounded capture of the version probe output. */
+const VERSION_MAX_OUTPUT_CHARS = 4_096
+
+/** Grace period after SIGTERM before a stuck probe child is SIGKILLed. */
+const VERSION_ESCALATION_TIMEOUT_MS = 5_000
+
+/** Successful probe freshness window before the host version is re-read. */
+const VERSION_PROBE_TTL_MS = 5 * 60_000
+
+/** Minimum gap between failed version probes (avoids a spawn per request). */
+const VERSION_PROBE_COOLDOWN_MS = 60_000
+
 /** Dependencies every route shares. */
 export interface GatewayRouteDeps {
   facts: ProfileFacts
   gateway: CliGateway
   /** Resolve the dsh binary presence (the CLI is the write path). */
   cliAvailable: () => boolean
-  /** Registry fetch seam for update checks (test seam). */
-  fetchLatest?: (name: string) => Promise<string | undefined>
+  /** Registry fetch seam for update checks (test seam); the default reads the
+   * `/<name>/latest` manifest including the `dsh` / `engines` metadata. */
+  fetchManifest?: (name: string) => Promise<RegistryVersionManifest | undefined>
+  /** Running DSH host version seam (test seam); the default probes `dsh --version`. */
+  dshVersion?: () => Promise<string | undefined>
   /** Official-channel detection seam (test seam); defaults to the boot dump probe. */
   officialChannels?: () => Promise<boolean>
 }
@@ -68,15 +87,75 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
   return parsed as Record<string, unknown>
 }
 
-/** Default registry latest-version probe for npm packages. */
-async function fetchLatestFromRegistry(name: string): Promise<string | undefined> {
+/** The published `/latest` manifest: version plus the compat metadata fields. */
+export interface RegistryVersionManifest {
+  version: string
+  /** Untrusted package manifest `dsh` object (bundle / client / engines). */
+  dsh?: unknown
+  /** Untrusted package manifest `engines` object (node / dsh). */
+  engines?: unknown
+}
+
+/** Append bounded probe output. */
+function captureProbe(chunk: Buffer, buffer: { value: string }): void {
+  buffer.value = (buffer.value + chunk.toString()).slice(-VERSION_MAX_OUTPUT_CHARS)
+}
+
+/**
+ * Default registry manifest probe for npm packages: `/<name>/latest` returns
+ * the full latest-version manifest, so the `dsh` / `engines` compat metadata
+ * rides the same request as the version (no packument needed).
+ */
+async function fetchRegistryManifest(name: string): Promise<RegistryVersionManifest | undefined> {
   const encoded = name.startsWith('@') ? name.replace('/', '%2F') : name
   const response = await fetch(`https://registry.npmjs.org/${encoded}/latest`, {
     signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS),
   })
   if (!response.ok) return undefined
-  const body = await response.json() as { version?: unknown }
-  return typeof body.version === 'string' ? body.version : undefined
+  const body = await response.json() as { version?: unknown; dsh?: unknown; engines?: unknown }
+  if (typeof body.version !== 'string') return undefined
+  return { version: body.version, dsh: body.dsh, engines: body.engines }
+}
+
+/**
+ * Read the running DSH host version through `dsh --version` (the CLI is the
+ * gateway's write path already; this package has no in-process source).
+ * Returns undefined when the binary is unavailable or the output is not a
+ * plain semver; callers treat an unknown host version as a fail-closed
+ * verdict for declared requirements (issue #754).
+ */
+async function probeDshVersion(cliAvailable: () => boolean): Promise<string | undefined> {
+  if (!cliAvailable()) return undefined
+  const binary = findDshBinary()
+  if (binary === null) return undefined
+  const output = { value: '' }
+  const child = spawnDsh(binary, ['--version'], process.env)
+  child.stdout?.on('data', (chunk: Buffer) => { captureProbe(chunk, output) })
+  child.stderr?.on('data', (chunk: Buffer) => { captureProbe(chunk, output) })
+  // SIGTERM can be ignored by a stuck CLI; escalate once so a probe can never
+  // hang the update/check endpoints for the host process lifetime, and always
+  // settle the promise on spawn failure (an 'error' event follows a vanished
+  // or unexecutable binary between findDshBinary and spawnDsh).
+  let escalated: ReturnType<typeof setTimeout> | undefined
+  const timer = setTimeout(() => {
+    child.kill()
+    escalated = setTimeout(() => { child.kill('SIGKILL') }, VERSION_ESCALATION_TIMEOUT_MS)
+  }, VERSION_TIMEOUT_MS)
+  const code = await new Promise<number | null>(resolve => {
+    let settled = false
+    const finish = (value: number | null): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (escalated !== undefined) clearTimeout(escalated)
+      resolve(value)
+    }
+    child.once('error', () => finish(null))
+    child.once('close', finish)
+  })
+  if (code !== 0) return undefined
+  const version = output.value.trim().split(/\r?\n/, 1)[0]?.trim() ?? ''
+  return parseDshVersion(version) === undefined ? undefined : version
 }
 
 /** Whether a dependency spec is a direct npm-registry selector, not an alias or external source. */
@@ -91,7 +170,48 @@ function isDirectRegistrySpec(spec: string): boolean {
  */
 export function makeGatewayRoutes(deps: GatewayRouteDeps): WebRoute[] {
   const { facts, gateway } = deps
-  const fetchLatest = deps.fetchLatest ?? fetchLatestFromRegistry
+  const fetchManifest = deps.fetchManifest ?? fetchRegistryManifest
+  /**
+   * Cached `dsh --version`: successful verdicts refresh after a TTL (the CLI
+   * update path is the gateway itself, so a stale success is wrong long-term),
+   * failed probes are retried after a cooldown instead of being cached forever,
+   * and concurrent requests share one in-flight probe.
+   */
+  let dshVersion: string | undefined
+  let dshVersionAt = 0
+  let dshVersionPending: Promise<string | undefined> | undefined
+  const resolveDshVersion = (): Promise<string | undefined> => {
+    if (deps.dshVersion !== undefined) return deps.dshVersion()
+    const now = Date.now()
+    if (dshVersion !== undefined && now - dshVersionAt < VERSION_PROBE_TTL_MS) return Promise.resolve(dshVersion)
+    if (dshVersionAt !== 0 && now - dshVersionAt < VERSION_PROBE_COOLDOWN_MS) return Promise.resolve(undefined)
+    if (dshVersionPending === undefined) {
+      dshVersionAt = now
+      dshVersionPending = probeDshVersion(deps.cliAvailable)
+        .catch(() => undefined)
+        .then(version => {
+          dshVersionPending = undefined
+          if (version !== undefined) {
+            dshVersion = version
+            dshVersionAt = now
+          }
+          return version
+        })
+    }
+    return dshVersionPending
+  }
+
+  /**
+   * Compat verdict for one declared requirement. Unverified (unknown host,
+   * malformed host output, unsupported range) is incompatible so an update
+   * can never run against a runtime we cannot prove compatible (issue #754);
+   * only absent metadata keeps the update fail-open.
+   */
+  const compatibleVerdict = async (requiresDsh: string): Promise<{ hostVersion?: string; compatible: boolean }> => {
+    const hostVersion = await resolveDshVersion()
+    if (hostVersion === undefined) return { compatible: false }
+    return { hostVersion, compatible: meetsMinimumDsh(hostVersion, requiresDsh) === true }
+  }
 
   /** Wrap a handler with the loopback fence and JSON error reporting. */
   const guard = (handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>) =>
@@ -157,11 +277,25 @@ export function makeGatewayRoutes(deps: GatewayRouteDeps): WebRoute[] {
       if (row.source.kind !== 'npm' || !isDirectRegistrySpec(row.source.spec)) {
         return { status: 400, error: `plugin-manager: ${target} is not a direct npm registry plugin` }
       }
-      const latest = await fetchLatest(target).catch(() => undefined)
-      if (latest === undefined || latest === '') return { status: 502, error: `plugin-manager: cannot resolve the latest version for ${target}` }
+      const manifest = await fetchManifest(target).catch(() => undefined)
+      if (manifest === undefined) return { status: 502, error: `plugin-manager: cannot resolve the latest version for ${target}` }
+      const latest = manifest.version
+      if (latest === '') return { status: 502, error: `plugin-manager: cannot resolve the latest version for ${target}` }
       const unsafeLatest = unsafeSpecReason(`${target}@${latest}`)
       if (unsafeLatest !== undefined) return { status: 502, error: unsafeLatest }
       if (row.version === latest) return { status: 409, error: `plugin-manager: ${target} is already at ${latest}` }
+      const requiresDsh = dshRequirementOf(manifest)
+      if (requiresDsh !== undefined) {
+        const { hostVersion, compatible } = await compatibleVerdict(requiresDsh)
+        if (!compatible) {
+          return {
+            status: 412,
+            error: hostVersion === undefined
+              ? `plugin-manager: cannot verify the DSH version for ${target} (dsh --version failed); upgrade DSH before updating`
+              : `plugin-manager: ${target} requires DSH ${requiresDsh} (current DSH ${hostVersion}); upgrade DSH before updating`,
+          }
+        }
+      }
       return { status: 200, job: gateway.update(target, latest) }
     })
     if ('error' in outcome) {
@@ -219,7 +353,7 @@ export function makeGatewayRoutes(deps: GatewayRouteDeps): WebRoute[] {
       sendJson(res, 400, { error: unsafeTarget })
       return
     }
-    const plugin = await gateway.withMutationLock(async () => {
+    const outcome = await gateway.withMutationLock(async () => {
       const patchText = await readPatchText(facts.patchPath)
       // Write and read the same id space: the entry ids the package's bundle
       // patch claims (falling back to the package name), not the package name
@@ -227,9 +361,10 @@ export function makeGatewayRoutes(deps: GatewayRouteDeps): WebRoute[] {
       // carries the entry's own name: the include semantics skip a bare row
       // whose name mismatches the inserted entry.
       const manifest = await readProfileManifest(facts.packageJsonPath)
-      const entries = manifest.dependencies[target] !== undefined
-        ? await claimedEntryRowsOf(facts, target)
-        : [{ id: target, name: target }]
+      if (manifest.dependencies[target] === undefined) {
+        return { error: `plugin-manager: plugin ${target} is not installed` } as const
+      }
+      const entries = await claimedEntryRowsOf(facts, target)
       let next = patchText
       for (const entry of entries) {
         next = setRowEnabled(next, facts.patchPath, entry.id, entry.name, enabled)
@@ -238,12 +373,16 @@ export function makeGatewayRoutes(deps: GatewayRouteDeps): WebRoute[] {
         await writePatchAtomic(facts.patchPath, next)
       }
       const snapshot = await snapshotGateway(facts, next)
-      return snapshot.plugins.find(item => item.id === target)
+      const plugin = snapshot.plugins.find(item => item.id === target)
+      return plugin === undefined
+        ? { error: `plugin-manager: plugin ${target} is not installed` } as const
+        : { plugin } as const
     })
-    sendJson(res, 200, { plugin: plugin ?? {
-      id: target, name: target, version: 'unknown',
-      source: { kind: 'npm', spec: target }, installedAt: '', enabled,
-    } })
+    if ('error' in outcome) {
+      sendJson(res, 404, { error: outcome.error })
+      return
+    }
+    sendJson(res, 200, { plugin: outcome.plugin })
   }
 
   const failuresHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -254,7 +393,7 @@ export function makeGatewayRoutes(deps: GatewayRouteDeps): WebRoute[] {
 
   // One verdict per host process: the browser half reads it instead of
   // probing the official channel, whose route 405s on the npm web runtime.
-  let modePromise: Promise<{ official: boolean }> | undefined
+  let modePromise: Promise<{ official: boolean | null }> | undefined
   const probeOfficialChannels = (): Promise<boolean> => {
     const binary = findDshBinary()
     if (binary === null) return Promise.resolve(false)
@@ -262,8 +401,15 @@ export function makeGatewayRoutes(deps: GatewayRouteDeps): WebRoute[] {
   }
   const modeHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if (modePromise === undefined) {
-      const probe = deps.officialChannels ?? probeOfficialChannels
-      modePromise = probe().then(official => ({ official })).catch(() => ({ official: false }))
+      if (facts.desktop) {
+        // Desktop registers installer services programmatically, so the CLI
+        // dump cannot see them. Null tells the browser to perform its existing
+        // direct RPC capability probe before falling back to this gateway.
+        modePromise = Promise.resolve({ official: null })
+      } else {
+        const probe = deps.officialChannels ?? probeOfficialChannels
+        modePromise = probe().then(official => ({ official })).catch(() => ({ official: false }))
+      }
     }
     sendJson(res, 200, await modePromise)
   }
@@ -271,13 +417,19 @@ export function makeGatewayRoutes(deps: GatewayRouteDeps): WebRoute[] {
   const checkUpdatesHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const patchText = await readPatchText(facts.patchPath)
     const snapshot = await snapshotGateway(facts, patchText)
-    const updates: Array<{ id: string; current: string; latest: string }> = []
+    const updates: Array<{ id: string; current: string; latest: string; requiresDsh?: string; compatible?: boolean }> = []
     for (const plugin of snapshot.plugins) {
       if (plugin.source.kind !== 'npm' || !isDirectRegistrySpec(plugin.source.spec)) continue
-      const latest = await fetchLatest(plugin.id).catch(() => undefined)
-      if (latest !== undefined && latest !== plugin.version) {
-        updates.push({ id: plugin.id, current: plugin.version, latest })
+      const manifest = await fetchManifest(plugin.id).catch(() => undefined)
+      if (manifest === undefined || manifest.version === plugin.version) continue
+      const update: { id: string; current: string; latest: string; requiresDsh?: string; compatible?: boolean } =
+        { id: plugin.id, current: plugin.version, latest: manifest.version }
+      const requiresDsh = dshRequirementOf(manifest)
+      if (requiresDsh !== undefined) {
+        update.requiresDsh = requiresDsh
+        update.compatible = (await compatibleVerdict(requiresDsh)).compatible
       }
+      updates.push(update)
     }
     sendJson(res, 200, { updates })
   }
