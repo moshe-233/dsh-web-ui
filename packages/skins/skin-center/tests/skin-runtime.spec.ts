@@ -14,6 +14,12 @@ import {
   setLayerContent,
 } from '../src/client/runtime/decoration-layers.ts'
 import { createSemanticAdapter } from '../src/client/runtime/semantic-adapter.ts'
+import {
+  DEFAULT_COMPOSER_CLEARANCE_PX,
+  installShellRenderingAdapter,
+  SHELL_RENDERING_STYLE_ATTR,
+  shellRenderingCss,
+} from '../src/client/runtime/shell-rendering.ts'
 import { createSkinController } from '../src/client/runtime/skin-controller.ts'
 import type { ControllerSkinEntry } from '../src/client/runtime/skin-controller.ts'
 
@@ -51,6 +57,16 @@ describe('decoration layers', () => {
     expect(again.background).toBe(layers.background)
   })
 
+  it('isolates the background layer on its own compositor layer (issue #1013)', () => {
+    // A full-viewport skin background image is costly to re-rasterize; without
+    // compositing isolation, unrelated repaint bursts (streaming chat, animated
+    // pets, overlay menus) make Chromium re-rasterize it in horizontal bands,
+    // visible as vertical band flicker. Keep will-change on the layer so the
+    // raster stays cached.
+    const layers = ensureDecorationLayers(document)
+    expect(layers.background.style.willChange).toBe('transform')
+  })
+
   it('setLayerContent teardown removes exactly its nodes, idempotently', () => {
     const layers = ensureDecorationLayers(document)
     const node = document.createElement('div')
@@ -72,11 +88,13 @@ describe('semantic adapter', () => {
   it('stamps surfaces and parts on existing and added nodes', async () => {
     document.body.innerHTML = `
       <div data-slot="sidebar"></div>
+      <button class="shell_newSession_hash" aria-label="新会话"></button>
       <div data-chat-flow-kind="message"></div>
     `
     const adapter = createSemanticAdapter(document)
     adapter.start()
     expect(document.querySelector('[data-slot="sidebar"]')!.getAttribute('data-dsh-surface')).toBe('sidebar')
+    expect(document.querySelector('button[aria-label="新会话"]')!.getAttribute('data-dsh-part')).toBe('new-session')
     expect(document.querySelector('[data-chat-flow-kind]')!.getAttribute('data-dsh-part')).toBe('message-row')
 
     const added = document.createElement('div')
@@ -102,6 +120,106 @@ describe('semantic adapter', () => {
     const diag = adapter.diagnostics()
     expect(diag.unmatchedRules.length).toBeGreaterThan(0)
     adapter.stop()
+  })
+})
+
+describe('shared shell rendering adapter (#954)', () => {
+  it('locks html and body viewport without clipping root or breaking layout width (#1135, #1222, #1225)', () => {
+    const css = shellRenderingCss()
+    expect(css).toContain('html[data-dsh-skin],')
+    expect(css).toContain('html[data-dsh-custom-theme]:not([data-dsh-skin]),')
+    expect(css).toContain('html[data-dsh-wallpaper-active],')
+    expect(css).toContain('overflow: hidden !important;')
+    expect(css).toContain('height: 100% !important;')
+    expect(css).toContain('width: 100% !important;')
+    // [id="root"] must not be locked with overflow: hidden or rigid dimensions to avoid bottom clipping (#1225) and sidebar push failure (#1222)
+    expect(css).not.toContain('[id="root"]')
+  })
+
+  it('scopes the workspace fade correction to active skin-center visual modes', () => {
+    const css = shellRenderingCss()
+    expect(css).toContain('html[data-dsh-skin] [data-slot="sidebar.workspaces"] [class*="_fade"]')
+    expect(css).toContain('html[data-dsh-custom-theme]:not([data-dsh-skin]) [data-slot="sidebar.workspaces"]')
+    expect(css).toContain('html[data-dsh-wallpaper-active] [data-slot="sidebar.workspaces"]')
+    expect(css).toContain('background-image: none !important;')
+    expect(css).not.toMatch(/^\s*\[data-slot="sidebar\.workspaces"\]/m)
+  })
+
+  it('uses readable theme text tokens for the composer placeholder', () => {
+    const css = shellRenderingCss()
+    expect(css).toContain('[data-composer-card] textarea[data-phase]::placeholder')
+    expect(css).toContain('textarea[data-dsh-part="composer-input"]::placeholder')
+    expect(css).toContain('var(--dsw-alias-label-secondary, var(--dsw-alias-label-caption))')
+    expect(css).toContain('-webkit-text-fill-color:')
+    expect(css).toContain('opacity: 1 !important;')
+  })
+
+  it('themes task and statistics docks from one skin-driven accessory contract', () => {
+    const css = shellRenderingCss()
+    expect(css).toContain('[data-slot="conversation.input.dock"] > *')
+    expect(css).toContain('[data-slot="conversation.composer.dock"] > *')
+    expect(css).toContain('var(--dsh-composer-accessory-bg, var(--dsw-specific-tip, var(--dsw-alias-bg-layer-1)))')
+    expect(css).toContain('var(--dsh-composer-accessory-color, var(--dsw-alias-label-tertiary))')
+    expect(css).toContain('var(--dsh-composer-accessory-radius, 12px)')
+    expect(css).toContain('var(--dsh-composer-accessory-gap, 4px)')
+  })
+
+  it('keeps the wide goal dock transparent and lets its compact inner bar paint', () => {
+    const css = shellRenderingCss()
+    expect(css).toContain('[data-slot="conversation.input.dock"] > [data-goal-bar="true"][data-goal-bar="true"][data-goal-bar="true"]')
+    expect(css).toMatch(/\[data-goal-bar="true"\](?:\[data-goal-bar="true"\]){2}[^{]*\{[^}]*background: transparent !important;/s)
+    expect(css).toMatch(/\[data-goal-bar="true"\](?:\[data-goal-bar="true"\]){2}[^{]*\{[^}]*box-shadow: none !important;/s)
+    expect(css).not.toContain('[data-goal-bar="true"] > *')
+  })
+
+  it('keeps composer geometry intact while retaining scroll clearance (#978, #1133)', () => {
+    const css = shellRenderingCss()
+    expect(css).toContain('[data-conversation-scroll]')
+    expect(css).toContain('[data-dsh-part="scrollport"]')
+    expect(css).toContain('padding-bottom: 0 !important;')
+    expect(css).toMatch(new RegExp(`\\[data-dsh-part=\"scrollport\"\\][^{]*\\{[^}]*padding-bottom: 0 !important;`, 's'))
+    expect(css).not.toContain('scroll-padding-bottom:')
+    expect(css).toContain('[data-conversation-scroll] [data-chat-anchor-key]')
+    expect(css).toContain('[data-conversation-scroll] [data-dsh-part="message-row"]')
+    expect(css).toContain(`scroll-margin-bottom: var(--dsh-composer-height, ${DEFAULT_COMPOSER_CLEARANCE_PX}px) !important;`)
+  })
+
+  it('measures composer height and cleans up custom property on teardown (#978)', () => {
+    document.head.innerHTML = ''
+    document.body.innerHTML = '<div data-slot="conversation.composer" style="height: 128px;"></div>'
+    const composer = document.body.querySelector('[data-slot="conversation.composer"]')!
+    vi.spyOn(composer, 'getBoundingClientRect').mockReturnValue({
+      height: 128,
+      width: 800,
+      top: 500,
+      bottom: 628,
+      left: 0,
+      right: 800,
+      x: 0,
+      y: 500,
+      toJSON: () => {},
+    })
+
+    const dispose = installShellRenderingAdapter(document)
+    expect(document.documentElement.style.getPropertyValue('--dsh-composer-height')).toBe('128px')
+
+    dispose()
+    expect(document.documentElement.style.getPropertyValue('--dsh-composer-height')).toBe('')
+  })
+
+  it('installs once and removes only the owned stylesheet on teardown', () => {
+    document.head.innerHTML = ''
+    const dispose = installShellRenderingAdapter(document)
+    expect(document.head.querySelectorAll(`style[${SHELL_RENDERING_STYLE_ATTR}]`)).toHaveLength(1)
+
+    const disposeDuplicate = installShellRenderingAdapter(document)
+    expect(document.head.querySelectorAll(`style[${SHELL_RENDERING_STYLE_ATTR}]`)).toHaveLength(1)
+    disposeDuplicate()
+    expect(document.head.querySelector(`style[${SHELL_RENDERING_STYLE_ATTR}]`)).not.toBeNull()
+
+    dispose()
+    dispose()
+    expect(document.head.querySelector(`style[${SHELL_RENDERING_STYLE_ATTR}]`)).toBeNull()
   })
 })
 
@@ -488,11 +606,12 @@ describe('skin controller', () => {
     expect(backgroundImgSrc()).toBe('')
   })
 
-  it('drives --dsh-skin-scrim with the background media (whale-mom contract)', async () => {
+  it('manages backdrop scene activation while preserving user scrim (#1178)', async () => {
     document.head.innerHTML = ''
     document.body.innerHTML = ''
     document.body.removeAttribute('style')
     document.documentElement.removeAttribute('data-dsh-skin')
+    document.body.style.setProperty('--dsw-skin-scrim', '0.6')
     const ledger = createEffectLedger()
     const loadStylesheet = async (href: string) => {
       const link = document.createElement('link')
@@ -516,11 +635,13 @@ describe('skin controller', () => {
       persist: async () => {},
       suppressBackgroundMedia: () => false,
     })
-    expect(document.body.style.getPropertyValue('--dsh-skin-scrim')).toBe('')
+    expect(document.body.style.getPropertyValue('--dsw-skin-scrim')).toBe('0.6')
     await controller.switchTo('media-skin', mediaEntry)
-    expect(document.body.style.getPropertyValue('--dsh-skin-scrim')).toBe('1')
+    expect(document.documentElement.getAttribute('data-dsh-backdrop-active')).toBe('true')
+    expect(document.body.style.getPropertyValue('--dsw-skin-scrim')).toBe('0.6')
     await controller.switchTo(null, null)
-    expect(document.body.style.getPropertyValue('--dsh-skin-scrim')).toBe('0')
+    expect(document.documentElement.hasAttribute('data-dsh-backdrop-active')).toBe(false)
+    expect(document.body.style.getPropertyValue('--dsw-skin-scrim')).toBe('0.6')
   })
 
   it('marks the unified backdrop-active marker and installs the shared composer-seat neutralizer while media is mounted (#777)', async () => {
@@ -555,6 +676,7 @@ describe('skin controller', () => {
     const neutralizer = document.head.querySelector('style[data-dsh-scene-neutralizer]')
     expect(neutralizer).not.toBeNull()
     expect(neutralizer?.textContent).toContain('html[data-dsh-backdrop-active] [data-composer-seat]::before')
+    expect(neutralizer?.textContent).not.toContain('[data-slot="conversation.composer.dock"] > *')
     // A plain skin (no background media) must never mark a backdrop.
     await controller.switchTo(null, null)
     expect(document.body.hasAttribute('data-dsh-backdrop-active')).toBe(false)
@@ -639,4 +761,3 @@ describe('skin controller', () => {
     expect(errors.some((m) => m.includes('broken-skin'))).toBe(true)
   })
 })
-

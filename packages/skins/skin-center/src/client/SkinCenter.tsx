@@ -1,8 +1,7 @@
 /**
  * The skin-center card: rendered as the content of a first-level settings
- * section, listing the official stock look plus every skin in the v2 catalog
- * (built-in asset directories inside the skin-center package + user dirs
- * under $DSH_HOME/skins).
+ * section, listing the official stock look plus every installed skin in the
+ * v2 catalog (package-shipped built-ins + user dirs under $DSH_HOME/skins).
  *
  * v2 architecture (issue #506): skins are pure asset directories loaded by
  * the skin-center runtime. Try-on and apply both go through the same atomic
@@ -67,7 +66,7 @@ function useLiveValue(value: number): [number, (v: number | null) => void] {
 
 /**
  * Render the skin-center card: a static header naming the plugin, with the
- * always-visible skin list (official default + every catalog skin; try-on /
+ * always-visible skin list (official default + every installed skin; try-on /
  * theme preview / one-click apply) rendered below it.
  * @param props - card props.
  * @returns the plugin card.
@@ -95,6 +94,17 @@ export function SkinCenter({ t, runtime, theme, background, wallpaper, preview, 
   const backdropActive = activeEntry?.manifest.contributes.backgroundMedia !== undefined
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [verifying, setVerifying] = useState(false)
+  const [verifySummary, setVerifySummary] = useState<{
+    total: number
+    valid: number
+    issues: number
+    repaired?: string[]
+    repairFailed?: Array<{ id: string; error: string }>
+  } | null>(null)
+  const [verifyReports, setVerifyReports] = useState<Record<string, { status: string; hooksTrusted: boolean; mismatches: string[]; missing: string[] }>>({})
+  const [confirmUninstallId, setConfirmUninstallId] = useState<string | null>(null)
+  const [uninstallingId, setUninstallingId] = useState<string | null>(null)
   // Unmount guard: once the card is gone, pending async completions must not
   // setState (the controller itself owns the skin state and lives on).
   const mounted = useRef(false)
@@ -187,7 +197,11 @@ export function SkinCenter({ t, runtime, theme, background, wallpaper, preview, 
       setError(t('applyFailed'))
       return
     }
-    run(target, () => preview.runSkin(() => switchAndDeactivateCustomTheme(target, entry)))
+    run(target, () => preview.runSkin(async () => {
+      const active = await switchAndDeactivateCustomTheme(target, entry)
+      if (wallpaper.selection() !== '') wallpaper.clearSelection()
+      return active
+    }))
   }
 
   const tryOnCustomTheme = (): void => {
@@ -218,45 +232,159 @@ export function SkinCenter({ t, runtime, theme, background, wallpaper, preview, 
     }))
   }
 
-  const dark = snapshot.active.colorScheme === 'dark'
+  const handleVerify = async (): Promise<void> => {
+    setVerifying(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/skin-center/v2/verify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ autoRepair: true }),
+      })
+      const json = (await res.json().catch(() => null)) as {
+        ok?: boolean
+        total?: number
+        valid?: number
+        issues?: number
+        repaired?: string[]
+        repairFailed?: Array<{ id: string; error: string }>
+        details?: Array<{ id: string; status: string; hooksTrusted: boolean; mismatches: string[]; missing: string[] }>
+      } | null
+      if (!res.ok || json?.ok !== true) {
+        throw new Error('verify failed')
+      }
+      if (!mounted.current) return
+      setVerifySummary({
+        total: json.total ?? 0,
+        valid: json.valid ?? 0,
+        issues: json.issues ?? 0,
+        repaired: json.repaired ?? [],
+        repairFailed: json.repairFailed ?? [],
+      })
+      const map: Record<string, { status: string; hooksTrusted: boolean; mismatches: string[]; missing: string[] }> = {}
+      for (const item of json.details ?? []) {
+        map[item.id] = item
+      }
+      setVerifyReports(map)
+      if (json.repaired && json.repaired.length > 0) {
+        await runtime.refreshCatalog()
+        if (activeId && json.repaired.includes(activeId)) {
+          const freshEntry = runtime.find(activeId)
+          if (freshEntry) {
+            await preview.runSkin(() => switchAndDeactivateCustomTheme(activeId, freshEntry))
+          }
+        }
+      }
+    } catch {
+      if (mounted.current) setError(t('applyFailed'))
+    } finally {
+      if (mounted.current) setVerifying(false)
+    }
+  }
 
-  /** One row: try-on control + apply button. Shared by the official card and every skin card. */
+  const handleUninstall = async (entry: CatalogSkin): Promise<void> => {
+    const id = entry.manifest.id
+    setUninstallingId(id)
+    setError(null)
+    try {
+      if (tryingId === id) {
+        await preview.runSkin(() => runtime.controller.exitTryOn())
+      }
+      if (activeId === id) {
+        await preview.runSkin(restoreOfficialLook)
+      }
+      const res = await fetch(`/api/skin-center/v2/skins/${encodeURIComponent(id)}/uninstall`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+      })
+      const json = (await res.json().catch(() => null)) as { ok?: boolean } | null
+      if (!res.ok || json?.ok !== true) {
+        throw new Error('uninstall failed')
+      }
+      await runtime.refreshCatalog()
+      if (mounted.current) setConfirmUninstallId(null)
+    } catch {
+      if (mounted.current) setError(t('uninstallFailed'))
+    } finally {
+      if (mounted.current) setUninstallingId(null)
+    }
+  }
+
+  const dark = document.body.hasAttribute('data-ds-dark-theme')
+
+  /** One row: try-on control + apply button + optional uninstall. Shared by the official card and every skin card. */
   const actionButtons = (opts: {
     key: string
+    entry?: CatalogSkin
     isActive: boolean
     isTrying: boolean
     onTryOn: () => void
     applyLabel: string
-  }): ReactNode => (
-    <div className={css.actions}>
-      {opts.isActive && !opts.isTrying ? (
-        <button type="button" className={`${css.button} ${css.buttonGhost}`} disabled>
-          {t('tryOn')}
-        </button>
-      ) : opts.isTrying ? (
-        <button type="button" className={`${css.button} ${css.buttonPrimary}`} disabled={busyId !== null} onClick={exitTryOn}>
-          {t('exitTryOn')}
-        </button>
-      ) : (
+  }): ReactNode => {
+    const isUser = opts.entry?.origin === 'user'
+    const isConfirming = isUser && confirmUninstallId === opts.key
+    return (
+      <div className={css.actions}>
+        {opts.isActive && !opts.isTrying ? (
+          <button type="button" className={`${css.button} ${css.buttonGhost}`} disabled>
+            {t('tryOn')}
+          </button>
+        ) : opts.isTrying ? (
+          <button type="button" className={`${css.button} ${css.buttonPrimary}`} disabled={busyId !== null || uninstallingId !== null} onClick={exitTryOn}>
+            {t('exitTryOn')}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className={`${css.button} ${css.buttonPrimary}`}
+            disabled={busyId !== null || uninstallingId !== null}
+            onClick={opts.onTryOn}
+          >
+            {busyId === opts.key ? t('loading') : t('tryOn')}
+          </button>
+        )}
         <button
           type="button"
-          className={`${css.button} ${css.buttonPrimary}`}
-          disabled={busyId !== null}
-          onClick={opts.onTryOn}
+          className={css.button}
+          disabled={busyId !== null || uninstallingId !== null}
+          onClick={() => { applySkin(opts.key) }}
         >
-          {busyId === opts.key ? t('loading') : t('tryOn')}
+          {busyId === opts.key ? t('applying') : opts.applyLabel}
         </button>
-      )}
-      <button
-        type="button"
-        className={css.button}
-        disabled={busyId !== null}
-        onClick={() => { applySkin(opts.key) }}
-      >
-        {busyId === opts.key ? t('applying') : opts.applyLabel}
-      </button>
-    </div>
-  )
+        {isUser && (
+          isConfirming ? (
+            <>
+              <button
+                type="button"
+                className={`${css.button} ${css.buttonDangerConfirm}`}
+                disabled={busyId !== null || uninstallingId !== null}
+                onClick={() => { if (opts.entry) void handleUninstall(opts.entry) }}
+              >
+                {uninstallingId === opts.key ? t('uninstalling') : t('confirm')}
+              </button>
+              <button
+                type="button"
+                className={css.button}
+                disabled={uninstallingId !== null}
+                onClick={() => { setConfirmUninstallId(null) }}
+              >
+                {t('cancel')}
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className={`${css.button} ${css.buttonDanger}`}
+              disabled={busyId !== null || uninstallingId !== null}
+              onClick={() => { setConfirmUninstallId(opts.key) }}
+            >
+              {t('uninstall')}
+            </button>
+          )
+        )}
+      </div>
+    )
+  }
 
   return (
     <li className={css.pluginCard}>
@@ -290,23 +418,44 @@ export function SkinCenter({ t, runtime, theme, background, wallpaper, preview, 
                 <>
                   <div className={css.head}>
                     <div className={css.intro} title={t('intro')}>{t('intro')}</div>
-                    <div className={css.themeRow}>
-                      <span className={css.themeLabel}>{t('theme')}</span>
+                    <div className={css.toolbar}>
+                      <div className={css.themeRow}>
+                        <span className={css.themeLabel}>{t('theme')}</span>
+                        <button
+                          type="button"
+                          className={`${css.themeButton} ${dark ? '' : css.themeButtonActive}`}
+                          onClick={() => { theme.setTheme('light') }}
+                        >
+                          {t('themeLight')}
+                        </button>
+                        <button
+                          type="button"
+                          className={`${css.themeButton} ${dark ? css.themeButtonActive : ''}`}
+                          onClick={() => { theme.setTheme('dark') }}
+                        >
+                          {t('themeDark')}
+                        </button>
+                      </div>
                       <button
                         type="button"
-                        className={`${css.themeButton} ${dark ? '' : css.themeButtonActive}`}
-                        onClick={() => { theme.setTheme('light') }}
+                        className={css.themeButton}
+                        disabled={verifying || busyId !== null || uninstallingId !== null}
+                        onClick={() => { void handleVerify() }}
                       >
-                        {t('themeLight')}
-                      </button>
-                      <button
-                        type="button"
-                        className={`${css.themeButton} ${dark ? css.themeButtonActive : ''}`}
-                        onClick={() => { theme.setTheme('dark') }}
-                      >
-                        {t('themeDark')}
+                        {verifying ? t('verifyingIntegrity') : t('verifyIntegrity')}
                       </button>
                     </div>
+                    {verifySummary !== null && (
+                      <div className={`${css.verifySummary} ${verifySummary.issues === 0 ? css.verifySummarySuccess : css.verifySummaryWarning}`}>
+                        {verifySummary.repaired && verifySummary.repaired.length > 0 && verifySummary.issues === 0
+                          ? t('verifyRepaired', { count: verifySummary.repaired.length })
+                          : verifySummary.issues === 0
+                          ? t('verifyAllPassed', { count: verifySummary.total })
+                          : verifySummary.repaired && verifySummary.repaired.length > 0
+                          ? `${t('verifyRepaired', { count: verifySummary.repaired.length })}, ${t('verifyFoundIssues', { count: verifySummary.issues })}`
+                          : t('verifyFoundIssues', { count: verifySummary.issues })}
+                      </div>
+                    )}
                   </div>
 
                   <div className={css.backgroundRow}>
@@ -446,6 +595,7 @@ export function SkinCenter({ t, runtime, theme, background, wallpaper, preview, 
                       const isActive = id === activeId && !previewing
                       const isTrying = previewing && id === tryingId
                       const badge = isActive ? t('active') : isTrying ? t('tryingOn') : null
+                      const report = verifyReports[id]
                       return (
                         <div className={css.card} key={id}>
                           <div className={css.cardHead}>
@@ -455,6 +605,30 @@ export function SkinCenter({ t, runtime, theme, background, wallpaper, preview, 
                               aria-hidden="true"
                             />
                             <span className={css.cardName} title={entry.manifest.nameEn}>{entry.manifest.nameEn}</span>
+                            {report && (
+                              <span
+                                className={`${css.badge} ${
+                                  report.status === 'valid'
+                                    ? css.badgeSuccess
+                                    : report.status === 'tampered'
+                                    ? css.badgeWarning
+                                    : css.badgeDanger
+                                }`}
+                                title={
+                                  report.status === 'valid'
+                                    ? t('integrityValid')
+                                    : [...report.mismatches, ...report.missing].join(', ') || report.status
+                                }
+                              >
+                                {report.status === 'valid'
+                                  ? t('integrityValid')
+                                  : report.status === 'tampered'
+                                  ? t('integrityTampered')
+                                  : report.status === 'missing-files'
+                                  ? t('integrityMissing')
+                                  : t('integrityHooksRefused')}
+                              </span>
+                            )}
                             {badge !== null && (
                               <span className={`${css.badge} ${isActive ? css.badgeActive : css.badgeTrying}`}>
                                 {badge}
@@ -464,8 +638,17 @@ export function SkinCenter({ t, runtime, theme, background, wallpaper, preview, 
                           <div className={css.cardTagline} title={entry.manifest.tagline ?? ''}>
                             {entry.manifest.tagline ?? ''}
                           </div>
+                          {report && report.status !== 'valid' && (
+                            <div className={css.integrityNote}>
+                              {[
+                                report.mismatches.length > 0 ? `${t('integrityTampered')}: ${report.mismatches.join(', ')}` : null,
+                                report.missing.length > 0 ? `${t('integrityMissing')}: ${report.missing.join(', ')}` : null,
+                              ].filter(Boolean).join(' | ')}
+                            </div>
+                          )}
                           {actionButtons({
                             key: id,
+                            entry,
                             isActive,
                             isTrying,
                             onTryOn: () => { tryOn(entry) },

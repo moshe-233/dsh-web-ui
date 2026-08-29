@@ -9,7 +9,7 @@ import { cleanup, render, screen } from '@testing-library/react'
 // The npm SDK's client half is a closure-factory bundle for the GUI's
 // __ModuleLoader__ (not importable under vitest); provide the defineStore
 // the pet store needs (same fake-store pattern as the settings-card tests).
-vi.mock('@deepseek-ai/dsh-client-runtime/client', () => ({
+vi.mock('@deepseek-ai/dsh-client-store', () => ({
   defineStore: (spec: {
     init: () => unknown
     actions: Record<string, (draft: never, ...args: never[]) => void>
@@ -79,6 +79,12 @@ function injected(): PetInjected {
     rename: vi.fn(),
     openSession: vi.fn(),
     feedbackDone: vi.fn(),
+    gameplay: {
+      touch: vi.fn(),
+      setMode: vi.fn(),
+      workTick: vi.fn(),
+      buy: vi.fn(),
+    },
   }
 }
 

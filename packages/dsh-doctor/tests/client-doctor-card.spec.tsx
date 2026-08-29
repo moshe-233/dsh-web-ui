@@ -18,7 +18,7 @@ import { en } from '../src/client/locales.ts'
 // The family settings-form slice value-imports the browser runtime bundle,
 // which is a window.__ModuleLoader__ closure; provide a node-safe stand-in so
 // the card spec only exercises the staged-form and console wiring.
-vi.mock('@deepseek-ai/dsh-client-runtime/client', () => ({
+vi.mock('@deepseek-ai/dsh-client-store', () => ({
   createSnapshotStore: () => ({
     subscribe: () => () => undefined,
     getSnapshot: () => undefined,
@@ -44,6 +44,7 @@ const cardState: DoctorSettingsCardState = {
   enabled: { text: 'false', overridden: false, invalid: false },
   fullProtection: { text: 'true', overridden: false, invalid: false },
   autoRepair: { text: 'true', overridden: false, invalid: false },
+  autoMigrate: { text: 'true', overridden: false, invalid: false },
 }
 
 function makeController(): DoctorController {
@@ -81,6 +82,7 @@ describe('DoctorSettingsCard', () => {
     expect(screen.getByLabelText('Enable rescue mode')).toBeTruthy()
     expect(screen.getByLabelText('Full protection')).toBeTruthy()
     expect(screen.getByLabelText('Auto repair')).toBeTruthy()
+    expect(screen.getByLabelText('Auto migrate legacy aggregate')).toBeTruthy()
     // Embedded console: status + incident cards render inside the card.
     expect(screen.getByText('Host status')).toBeTruthy()
     expect(container.querySelector('[data-dsh-plugin="doctor"]')).toBeTruthy()

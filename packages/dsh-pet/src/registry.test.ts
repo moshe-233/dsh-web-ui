@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -8,6 +8,7 @@ import {
   DEFAULT_TRACK_PATTERNS,
   PET_ROW_ORDER,
   PET_SCAN_JSON_CAP,
+  PET_SCAN_LIVE2D_MODEL_CAP,
   codexPetsDir,
   loadPetRegistry,
   petAtlasFile,
@@ -151,18 +152,185 @@ describe('resolvePetManifest', () => {
   })
 })
 
+describe('loadPetRegistry frames2d', () => {
+  /** Write a frames2d pet fixture: pet.json + thumb/<track>/<frame> files. */
+  function writeFrames2dPet(root: string, id: string, manifest: Record<string, unknown>, files: Record<string, string[]>): string {
+    const dir = join(root, 'assets', id)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'pet.json'), JSON.stringify({
+      petManifestVersion: 2,
+      id,
+      displayName: id,
+      license: 'MIT',
+      renderer: 'frames2d',
+      ...manifest,
+    }), 'utf8')
+    for (const [trackDir, frames] of Object.entries(files)) {
+      mkdirSync(join(dir, trackDir), { recursive: true })
+      for (const frame of frames) writeFileSync(join(dir, trackDir, frame), 'webp', 'utf8')
+    }
+    return dir
+  }
+
+  it('resolves directory-listed tracks with filename-encoded durations', () => {
+    const root = tempDir()
+    try {
+      writeFrames2dPet(root, 'miku', {
+        frames2d: {
+          dir: 'thumb',
+          tracks: { idle: { loop: true }, happy: { loop: false } },
+          phases: { idle: 'idle', done: 'happy' },
+        },
+      }, {
+        'thumb/idle': ['miku_1_200.webp', 'miku_2_260.webp'],
+        'thumb/happy': ['miku-happy_1_300.webp'],
+      })
+      const registry = loadPetRegistry({ packageRoot: root, petsDir: '', dshPetsDir: '' })
+      const entry = registry.byId('miku')
+      expect(entry?.renderer).toBe('frames2d')
+      expect(entry?.frames2d?.phases).toEqual({ idle: 'idle', done: 'happy' })
+      expect(entry?.frames2d?.tracks.idle).toMatchObject({ loop: true, durations: [200, 260] })
+      expect(entry?.frames2d?.tracks.idle?.frames).toEqual([
+        '/pet/miku/thumb/idle/miku_1_200.webp',
+        '/pet/miku/thumb/idle/miku_2_260.webp',
+      ])
+      expect(entry?.frames2d?.tracks.happy).toMatchObject({ loop: false, fallback: 'idle', durations: [300] })
+      expect([...(entry?.servable ?? [])].sort()).toEqual([
+        'thumb/happy/miku-happy_1_300.webp',
+        'thumb/idle/miku_1_200.webp',
+        'thumb/idle/miku_2_260.webp',
+      ])
+      expect(entry?.atlasUrl).toBe('/pet/miku/thumb/idle/miku_1_200.webp')
+      // The browser view carries the frames2d block.
+      const view = petEntryView(entry!)
+      expect(view.frames2d?.tracks.idle?.frames).toHaveLength(2)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('orders directory-scanned frames by their trailing index (10+ frames)', () => {
+    const root = tempDir()
+    try {
+      const names = Array.from({ length: 12 }, (_, index) => 'miku-pet-eat' + String(index + 1) + '.webp')
+      writeFrames2dPet(root, 'miku', {
+        frames2d: { dir: 'thumb', tracks: { eat: { loop: false } }, phases: { idle: 'eat' } },
+      }, { 'thumb/eat': names })
+      const registry = loadPetRegistry({ packageRoot: root, petsDir: '', dshPetsDir: '' })
+      const frames = registry.byId('miku')?.frames2d?.tracks.eat?.frames ?? []
+      expect(frames).toHaveLength(12)
+      expect(frames[1]).toBe('/pet/miku/thumb/eat/miku-pet-eat2.webp')
+      expect(frames[9]).toBe('/pet/miku/thumb/eat/miku-pet-eat10.webp')
+      expect(frames[11]).toBe('/pet/miku/thumb/eat/miku-pet-eat12.webp')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('honours explicit frames order and frameMs over filename-encoded durations', () => {
+    const root = tempDir()
+    try {
+      writeFrames2dPet(root, 'fox', {
+        frames2d: {
+          dir: 'thumb',
+          tracks: { idle: { frames: ['b_100.webp', 'a_100.webp'], frameMs: [111, 222], loop: true } },
+          phases: { idle: 'idle' },
+        },
+      }, { 'thumb/idle': ['a_100.webp', 'b_100.webp'] })
+      const entry = loadPetRegistry({ packageRoot: root, petsDir: '', dshPetsDir: '' }).byId('fox')
+      expect(entry?.frames2d?.tracks.idle?.frames).toEqual([
+        '/pet/fox/thumb/idle/b_100.webp',
+        '/pet/fox/thumb/idle/a_100.webp',
+      ])
+      expect(entry?.frames2d?.tracks.idle?.durations).toEqual([111, 222])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('drops an empty track and remaps its phases to idle with a warning', () => {
+    const root = tempDir()
+    try {
+      writeFrames2dPet(root, 'miku', {
+        frames2d: {
+          dir: 'thumb',
+          tracks: { idle: {}, work: {} },
+          phases: { idle: 'idle', thinking: 'work' },
+        },
+      }, { 'thumb/idle': ['miku_1_200.webp'] })
+      const registry = loadPetRegistry({ packageRoot: root, petsDir: '', dshPetsDir: '' })
+      const entry = registry.byId('miku')
+      expect(entry?.frames2d?.tracks.work).toBeUndefined()
+      expect(entry?.frames2d?.phases.thinking).toBe('idle')
+      expect(registry.warnings.some(warning => warning.includes('work'))).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects the entry fail-closed when the idle track has no frames on disk', () => {
+    const root = tempDir()
+    try {
+      writeFrames2dPet(root, 'miku', {
+        frames2d: {
+          dir: 'thumb',
+          tracks: { idle: {}, happy: {} },
+          phases: { idle: 'idle', done: 'happy' },
+        },
+      }, { 'thumb/happy': ['miku_1_200.webp'] })
+      const registry = loadPetRegistry({ packageRoot: root, petsDir: '', dshPetsDir: '' })
+      expect(registry.byId('miku')).toBeUndefined()
+      expect(registry.diagnostics.some(d => d.level === 'error' && d.message.includes('idle'))).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('warns and skips a missing explicit frame', () => {
+    const root = tempDir()
+    try {
+      writeFrames2dPet(root, 'miku', {
+        frames2d: {
+          dir: 'thumb',
+          tracks: { idle: { frames: ['a_100.webp', 'gone_100.webp'] } },
+          phases: { idle: 'idle' },
+        },
+      }, { 'thumb/idle': ['a_100.webp'] })
+      const registry = loadPetRegistry({ packageRoot: root, petsDir: '', dshPetsDir: '' })
+      const entry = registry.byId('miku')
+      expect(entry?.frames2d?.tracks.idle?.frames).toEqual(['/pet/miku/thumb/idle/a_100.webp'])
+      expect(registry.warnings.some(warning => warning.includes('gone_100.webp'))).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('loadPetRegistry', () => {
-  it('ships the original and refined whale variants while keeping the original default', () => {
+  it('ships every built-in pet while keeping the original whale as default', () => {
     const registry = loadPetRegistry({
       packageRoot: petPackageRoot(import.meta.url),
       petsDir: '',
       dshPetsDir: '',
     })
 
+    // The repo checkout also resolves miku (frames2d gameplay pet) from
+    // assets/; the npm files whitelist excludes it (Workshop delivery), so
+    // npm installs see the three atlas pets until a Workshop install lands
+    // miku under $DSH_HOME/pets.
     expect(registry.entries.map(entry => entry.id)).toEqual([
+      'miku',
+      'ouo-neko',
       'whale-girl',
       'whale-girl-refined',
     ])
+    expect(registry.byId('ouo-neko')).toMatchObject({
+      displayName: 'OUO Neko',
+      atlasRows: 11,
+      columns: 8,
+      rows: [6, 8, 8, 4, 5, 8, 6, 6, 6],
+    })
+    expect(existsSync(petAtlasFile(registry.byId('ouo-neko')!))).toBe(true)
     expect(registry.byId('whale-girl')?.displayName).toBe('鲸鱼娘（原版）')
     expect(registry.byId('whale-girl-refined')?.displayName).toBe('鲸鱼娘（精致版）')
     expect(existsSync(petAtlasFile(registry.byId('whale-girl-refined')!))).toBe(true)
@@ -257,6 +425,41 @@ describe('loadPetRegistry', () => {
       }), 'utf8')
       const registry = loadPetRegistry({ packageRoot: join(root, 'no-assets'), petsDir, dshPetsDir: '' })
       expect(registry.defaultEntry().id).toBe('aardvark')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('skips an oversized pet.json with a warning instead of reading it', () => {
+    const root = tempDir()
+    try {
+      const petsDir = join(root, 'pets')
+      mkdirSync(join(petsDir, 'loud'), { recursive: true })
+      writeFileSync(join(petsDir, 'loud', 'pet.json'), '{ ' + 'x'.repeat(PET_SCAN_JSON_CAP) + ' }', 'utf8')
+      // A healthy neighbor keeps listing while the pathological one is skipped.
+      mkdirSync(join(petsDir, 'plain'), { recursive: true })
+      writeFileSync(join(petsDir, 'plain', 'pet.json'), JSON.stringify({
+        id: 'plain', displayName: 'Plain', spritesheetPath: 'spritesheet.webp',
+      }), 'utf8')
+      writeFileSync(join(petsDir, 'plain', 'spritesheet.webp'), 'webp', 'utf8')
+      const registry = loadPetRegistry({ packageRoot: join(root, 'none'), petsDir, dshPetsDir: '' })
+      expect(registry.byId('loud')).toBeUndefined()
+      expect(registry.byId('plain')).toBeDefined()
+      expect(registry.warnings.some(w => w.includes('scan ceiling'))).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('skips a non-regular pet.json with a warning', () => {
+    const root = tempDir()
+    try {
+      const petsDir = join(root, 'pets')
+      mkdirSync(join(petsDir, 'odd', 'pet.json'), { recursive: true })
+      const registry = loadPetRegistry({ packageRoot: join(root, 'none'), petsDir, dshPetsDir: '' })
+      expect(registry.entries.map(entry => entry.id)).toEqual([])
+      expect(registry.warnings.some(w => w.includes('not a regular file'))).toBe(true)
+      expect(registry.diagnostics.some(d => d.level === 'warning' && d.message.includes('pet manifest is not a regular file'))).toBe(true)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -475,6 +678,52 @@ describe('loadPetRegistry pet-center v2 (issue #623)', () => {
       // '' disables the source entirely.
       const disabled = loadPetRegistry({ packageRoot: join(root, 'none'), petsDir: '', dshPetsDir: dsh })
       expect(disabled.entries.map(e => e.id)).toEqual(['cat'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('skips a live2d pet whose model3.json exceeds the model scan ceiling with a warning', () => {
+    const root = tempDir()
+    try {
+      const petsDir = join(root, 'pets')
+      mkdirSync(join(petsDir, 'haru'), { recursive: true })
+      writeFileSync(join(petsDir, 'haru', 'pet.json'), JSON.stringify({
+        petManifestVersion: 2, id: 'haru', displayName: 'Haru', license: 'Live2D-Sample',
+        renderer: 'live2d', live2d: { model: 'haru.model3.json', motions: { idle: 'Idle' } },
+      }), 'utf8')
+      // A sparse file one byte past the ceiling: stat reports the size
+      // without materializing 32 MB of bytes on disk.
+      const fd = openSync(join(petsDir, 'haru', 'haru.model3.json'), 'w')
+      try {
+        ftruncateSync(fd, PET_SCAN_LIVE2D_MODEL_CAP + 1)
+      } finally {
+        closeSync(fd)
+      }
+      const registry = loadPetRegistry({ packageRoot: join(root, 'none'), petsDir, dshPetsDir: '' })
+      expect(registry.byId('haru')).toBeUndefined()
+      expect(registry.warnings.some(w => w.includes('scan ceiling'))).toBe(true)
+      expect(registry.diagnostics.some(d => d.level === 'warning'
+        && d.message.includes('exceeds the ' + PET_SCAN_LIVE2D_MODEL_CAP + '-byte scan ceiling'))).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('skips a live2d pet whose model3.json is not a regular file with a warning', () => {
+    const root = tempDir()
+    try {
+      const petsDir = join(root, 'pets')
+      mkdirSync(join(petsDir, 'haru', 'haru.model3.json'), { recursive: true })
+      writeFileSync(join(petsDir, 'haru', 'pet.json'), JSON.stringify({
+        petManifestVersion: 2, id: 'haru', displayName: 'Haru', license: 'Live2D-Sample',
+        renderer: 'live2d', live2d: { model: 'haru.model3.json', motions: { idle: 'Idle' } },
+      }), 'utf8')
+      const registry = loadPetRegistry({ packageRoot: join(root, 'none'), petsDir, dshPetsDir: '' })
+      expect(registry.byId('haru')).toBeUndefined()
+      expect(registry.warnings.some(w => w.includes('not a regular file'))).toBe(true)
+      expect(registry.diagnostics.some(d => d.level === 'warning'
+        && d.message.includes('live2d model haru.model3.json is not a regular file'))).toBe(true)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

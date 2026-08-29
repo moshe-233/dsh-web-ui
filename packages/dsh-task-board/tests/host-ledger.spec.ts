@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createTask, startExecution, withSchedule, type TaskRecord } from '../src/core/tasks.ts'
+import { createTask, EXECUTION_HISTORY_LIMIT, startExecution, withSchedule, type TaskRecord } from '../src/core/tasks.ts'
 import { HostTaskLedger, processIsAlive, processState } from '../src/host-ledger.ts'
 
 const roots: string[] = []
@@ -257,6 +257,36 @@ describe('HostTaskLedger', () => {
     restarted.dispose()
   })
 
+  it('trims an over-limit execution history when loading an old ledger file', () => {
+    const root = tempRoot()
+    const executions = Array.from({ length: 30 }, (_, index) => ({
+      id: `old-${index}`,
+      sessionId: `session-${index}`,
+      startedAt: NOW - 100 - index,
+      endedAt: NOW - 50 - index,
+      result: 'succeeded' as const,
+      error: undefined,
+    }))
+    writeFileSync(join(root, 'ledger-v2.json'), JSON.stringify({
+      schemaVersion: 2,
+      revision: 7,
+      tasks: [{ ...task('fat'), executions }],
+      scheduler: { timeZone: 'UTC', ledgerId: 'ledger-fat' },
+      recentRequests: [],
+    }), 'utf8')
+
+    const ledger = new HostTaskLedger(root, () => NOW + 1000)
+    const loaded = ledger.state().tasks[0]
+    expect(loaded.executions).toHaveLength(EXECUTION_HISTORY_LIMIT)
+    expect(loaded.executions[0].id).toBe('old-10')
+    expect(loaded.executions.at(-1)?.id).toBe('old-29')
+    // The initial commit persists the trimmed view, so the read and write
+    // paths agree on the retention limit.
+    const onDisk = JSON.parse(readFileSync(join(root, 'ledger-v2.json'), 'utf8')) as { tasks: { executions: unknown[] }[] }
+    expect(onDisk.tasks[0].executions).toHaveLength(EXECUTION_HISTORY_LIMIT)
+    ledger.dispose()
+  })
+
   it('fails closed on a second live owner of the same ledger directory', () => {
     const root = tempRoot()
     const first = new HostTaskLedger(root, () => NOW)
@@ -454,6 +484,29 @@ describe('HostTaskLedger', () => {
     })).toThrow('archived task is read-only')
     expect(ledger.openScheduled('archived', NOW + 60_000, NOW)).toBeUndefined()
     expect(ledger.state().tasks[0].executions).toEqual([])
+  })
+
+  it('edits task content only before the first execution and keeps targets editable after', () => {
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('create', { kind: 'create', id: 'task-a', input: { title: 'A', description: 'd', prompt: 'p' } })
+    const edited = ledger.applyRequest('update', { kind: 'update', taskId: 'task-a', patch: { title: 'B', description: 'd2', prompt: 'p2' } })
+    expect(edited.state.tasks[0]).toMatchObject({ title: 'B', description: 'd2', prompt: 'p2' })
+
+    expect(() => ledger.applyRequest('update-blank-title', { kind: 'update', taskId: 'task-a', patch: { title: '   ' } })).toThrow('title is required')
+
+    const opened = ledger.applyRequest('run', { kind: 'run', taskId: 'task-a' })
+    const executionId = opened.state.tasks[0].executions[0].id
+    expect(() => ledger.applyRequest('update-running', { kind: 'update', taskId: 'task-a', patch: { prompt: 'live' } })).toThrow('task has already been executed')
+
+    ledger.settle('task-a', executionId, 'failed', 'boom')
+    expect(() => ledger.applyRequest('update-done', { kind: 'update', taskId: 'task-a', patch: { title: 'C' } })).toThrow('task has already been executed')
+
+    // Execution targets stay editable on an executed task; content stays fixed.
+    const targets = ledger.applyRequest('update-targets', { kind: 'update', taskId: 'task-a', patch: { workspaceId: 'ws-1', mode: 'anchored', permission: 'read-only' } })
+    expect(targets.state.tasks[0]).toMatchObject({
+      title: 'B', description: 'd2', prompt: 'p2',
+      workspaceId: 'ws-1', mode: 'anchored', permission: 'read-only',
+    })
   })
 
   it('rejects a newly armed cron with no reachable occurrence', () => {

@@ -4,20 +4,30 @@
  * images, lists, blockquotes, hr, and tables. All HTML is escaped before
  * transformation — the output only ever contains the renderer's own tags.
  * Dependency-free on purpose (the mobile bundle stays at ~456 KB); the
- * escape-first + protocol allow-list design mirrors the desktop panel's
- * preview renderer (dsh-aionui-panel/src/client/preview/markdown.ts).
+ * escape-first + protocol allow-list design mirrors the retired desktop
+ * panel's preview renderer (the dsh-aionui-panel package, removed 2026-08-28).
  * Pure and exported for tests.
  * @module dsh-remote-web-ui/mobile/markdown
  */
 
-/** Escape HTML special characters. */
+/** HTML special-character map for {@link escapeHtml}. */
+const HTML_ESCAPE_MAP: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+}
+
+/**
+ * Escape HTML special characters. One regex pass replaces all five
+ * characters through the map; the output is identical to five sequential
+ * passes (each replacement string contains none of the escaped characters),
+ * and the common no-special-character case scans the string only once
+ * instead of five times.
+ */
 export function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
+  return text.replace(/[&<>"']/g, char => HTML_ESCAPE_MAP[char] ?? char)
 }
 
 /**

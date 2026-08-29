@@ -12,11 +12,12 @@
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { MuxFrame } from '@deepseek-ai/dsh-host-apiproxy/api/events'
-import type { SessionModels } from '@deepseek-ai/dsh-host-apiproxy/api/sessions'
+import type { MuxFrame } from '../../mobile-pending.ts'
+import type { SessionModels } from '../api.ts'
 import { loadHistory, prompt, type SessionView } from './App.tsx'
 import { errorText, formatTime, staleHostHint } from './App.tsx'
-import { fetchMobilePreferences, models, selectModel, sendCommand } from '../api.ts'
+import { fetchMobilePreferences, models, selectModel, sendCommand, cancelSession, fetchPending, respondApproval, respondQuestion } from '../api.ts'
+import type { PendingApproval, PendingQuestionItem } from '../api.ts'
 import { EventFolder, foldEvents, type RenderMessage, type ToolCallInfo, type WireEvent } from '../messages.ts'
 import { renderMarkdown } from '../markdown.ts'
 import { MuxClient } from '../mux.ts'
@@ -36,6 +37,14 @@ export interface ChatViewProps {
  * history tail re-pull closes the seam.
  */
 export const MAX_TAIL_BUFFER_EVENTS = 500
+
+/**
+ * Cadence for folding buffered live events into the message list. Streaming
+ * chunks can arrive at a far higher rate; flushing on this cadence caps fold
+ * and re-render work per second without visible lag, and keeps working in
+ * background tabs where requestAnimationFrame is paused.
+ */
+export const FOLD_FLUSH_MS = 50
 
 /** localStorage key for the tool-call display toggle (persisted on the /m origin). */
 const SHOW_TOOL_CALLS_KEY = 'dsh.mobile.showToolCalls'
@@ -146,6 +155,14 @@ export function ChatView({ session, mux, onBack }: ChatViewProps) {
   const liveBufferRef = useRef<WireEvent[]>([])
   /** Incremental folder for this session's stream (indexes stay hot across events). */
   const folderRef = useRef<EventFolder | undefined>(undefined)
+  /**
+   * Live events buffered between fold flushes. Folding every single event
+   * costs one O(messages) snapshot copy per event; flushing at a fixed
+   * cadence folds each burst once while keeping streaming text fluid.
+   */
+  const foldBufferRef = useRef<WireEvent[]>([])
+  /** Timer id of the scheduled fold flush, if any. */
+  const foldFlushTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   /** True once the live buffer hit its cap (oldest events were dropped). */
   const liveBufferOverflowRef = useRef(false)
 
@@ -164,6 +181,14 @@ export function ChatView({ session, mux, onBack }: ChatViewProps) {
    * the legacy Enter-to-send behavior until the preference loads).
    */
   const [mobileEnterToSend, setMobileEnterToSend] = useState(true)
+  /** Whether the assistant is currently generating (turn/start..turn/end). */
+  const [running, setRunning] = useState(false)
+  /** Whether a stop request is in flight (guards the composer's stop button). */
+  const [stopping, setStopping] = useState(false)
+  /** Pending tool approvals awaiting user decision (#1025). */
+  const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([])
+  /** Pending questions awaiting user answer (#1025). */
+  const [pendingQuestions, setPendingQuestions] = useState<PendingQuestionItem[]>([])
 
   // Read-only mobile display preferences ride the plugin's local
   // `/m/api` method; a failure keeps the default (Enter sends).
@@ -264,10 +289,29 @@ export function ChatView({ session, mux, onBack }: ChatViewProps) {
   // Live frames: fold session events for this session in as they arrive.
   useEffect(() => {
     if (mux === undefined) return
-    return mux.onFrame((frame: MuxFrame) => {
+    /** Fold every buffered live event in one batch and publish the snapshot. */
+    const flushFoldBuffer = (): void => {
+      if (foldFlushTimerRef.current !== undefined) {
+        clearTimeout(foldFlushTimerRef.current)
+        foldFlushTimerRef.current = undefined
+      }
+      const events = foldBufferRef.current
+      if (events.length === 0) return
+      foldBufferRef.current = []
+      setMessages(previous => {
+        const folder = folderRef.current
+        return folder === undefined ? foldEvents(events, previous) : folder.fold(events)
+      })
+    }
+    const unsubscribe = mux.onFrame((frame: MuxFrame) => {
       if (frame.type === 'session/event') {
         if (frame.sessionId !== session.sessionId) return
         const event = frame.event as WireEvent
+        // Track the turn running state for the "outputting" indicator (#1017).
+        if (typeof event.type === 'string') {
+          if (event.type === 'turn/start') setRunning(true)
+          if (event.type === 'turn/end') setRunning(false)
+        }
         if (tailLoadingRef.current) {
           if (liveBufferRef.current.length >= MAX_TAIL_BUFFER_EVENTS) {
             // Bound the tail-load window: drop the oldest buffered event and
@@ -284,10 +328,16 @@ export function ChatView({ session, mux, onBack }: ChatViewProps) {
           liveBufferRef.current.push(event)
           return
         }
-        setMessages(previous => {
-          const folder = folderRef.current
-          return folder === undefined ? foldEvents([event], previous) : folder.fold([event])
-        })
+        foldBufferRef.current.push(event)
+        // Only chunk streams batch on the flush cadence; every other event
+        // (final message, turn close, user echo, update/delete) flushes the
+        // buffer synchronously so settled UI states never wait for a timer.
+        const isChunk = event.type === 'assistant/chunk' || event.type === 'message/chunk'
+        if (!isChunk) {
+          flushFoldBuffer()
+        } else if (foldFlushTimerRef.current === undefined) {
+          foldFlushTimerRef.current = setTimeout(flushFoldBuffer, FOLD_FLUSH_MS)
+        }
         return
       }
       // Live projection pushes keep the permission picker current.
@@ -295,9 +345,72 @@ export function ChatView({ session, mux, onBack }: ChatViewProps) {
         && frame.sessionId === session.sessionId
         && frame.key === 'permissions') {
         setPermissions(parsePermissionSelect(frame.value))
+        return
+      }
+      // Approval/question frames for this session (#1025).
+      if (!('sessionId' in frame) || frame.sessionId !== session.sessionId) return
+      if (frame.type === 'approval/requested') {
+        setPendingApprovals(previous => {
+          if (previous.some(a => a.approvalId === frame.approvalId)) return previous
+          return [...previous, {
+            approvalId: frame.approvalId as string,
+            toolName: frame.toolName,
+            callId: frame.callId as string | undefined,
+            reason: frame.reason,
+          }]
+        })
+        return
+      }
+      if (frame.type === 'approval/resolved') {
+        setPendingApprovals(previous => previous.filter(a => a.approvalId !== frame.approvalId))
+        return
+      }
+      if (frame.type === 'question/requested') {
+        const items = (frame.questions as Array<{
+          id: string; question: string; detail?: string; header?: string
+          options?: Array<{ label: string; description?: string }>; multiSelect?: boolean
+        }>)
+        setPendingQuestions(items)
+        return
+      }
+      if (frame.type === 'question/resolved') {
+        setPendingQuestions([])
+        return
       }
     })
+    return () => {
+      unsubscribe()
+      // Drop the pending flush: its events belong to the session (or
+      // component instance) being torn down, and the next session reseeds
+      // its folder from a fresh history tail.
+      if (foldFlushTimerRef.current !== undefined) {
+        clearTimeout(foldFlushTimerRef.current)
+        foldFlushTimerRef.current = undefined
+      }
+      foldBufferRef.current = []
+    }
   }, [mux, session.sessionId])
+
+  // Weak-network polling fallback: when the assistant is running, poll for
+  // pending approvals/questions every 1.5 s so the phone can act even if the
+  // SSE channel drops frames (#1025).
+  useEffect(() => {
+    if (!running) return
+    let cancelled = false
+    const tick = (): void => {
+      void fetchPending(session.sessionId).then(
+        (state) => {
+          if (cancelled) return
+          setPendingApprovals(state.approvals)
+          setPendingQuestions(state.questions.flatMap((group) => group.questions))
+        },
+        () => { /* transient; next tick retries */ },
+      )
+    }
+    tick()
+    const timer = setInterval(tick, 1500)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [running, session.sessionId])
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current
@@ -377,6 +490,24 @@ export function ChatView({ session, mux, onBack }: ChatViewProps) {
     )
   }, [input, sending, session.sessionId])
 
+  /**
+   * Stop the active turn (desktop parity: the composer's primary button
+   * becomes a stop button while running). The turn/end frame arriving over
+   * mux flips the button back; a failed request surfaces through the chat
+   * error line.
+   */
+  const stopTurn = useCallback(() => {
+    if (stopping) return
+    setStopping(true)
+    void cancelSession(session.sessionId).then(
+      () => { setStopping(false) },
+      (reason: unknown) => {
+        setStopping(false)
+        setError(errorText(reason))
+      },
+    )
+  }, [stopping, session.sessionId])
+
   const modelLabel = currentModel?.model ?? '模型'
   const permissionLabel = permissions === undefined
     ? undefined
@@ -424,6 +555,26 @@ export function ChatView({ session, mux, onBack }: ChatViewProps) {
         ))}
         {loading && messages.length === 0 && <p className="chat-typing">加载中…</p>}
         {!loading && messages.length === 0 && <p className="chat-typing">还没有消息，发一句话开始吧</p>}
+        {running && (
+          <div className="chat-turn-status" role="status" aria-label="输出中">
+            输出中<span className="chat-turn-dots" aria-hidden><span /><span /><span /></span>
+          </div>
+        )}
+        {pendingApprovals.map(approval => (
+          <ApprovalPanel
+            key={approval.approvalId}
+            approval={approval}
+            sessionId={session.sessionId}
+            onResolved={(id) => { setPendingApprovals(prev => prev.filter(a => a.approvalId !== id)) }}
+          />
+        ))}
+        {pendingQuestions.length > 0 && (
+          <QuestionPanel
+            questions={pendingQuestions}
+            sessionId={session.sessionId}
+            onResolved={() => { setPendingQuestions([]) }}
+          />
+        )}
       </div>
       <div className="chat-tools">
         <button type="button" className="chat-chip" onClick={() => { setSheet('model') }} aria-haspopup="dialog">
@@ -463,8 +614,18 @@ export function ChatView({ session, mux, onBack }: ChatViewProps) {
             }
           }}
         />
-        <button type="button" className="chat-send" disabled={sending || input.trim() === ''} onClick={() => { void send() }}>
-          {sending ? '发送中…' : '发送'}
+        <button
+          type="button"
+          className={running ? 'chat-send chat-send-stop' : 'chat-send'}
+          {...(running ? { 'aria-label': stopping ? '停止中' : '停止' } : {})}
+          disabled={running ? stopping : sending || input.trim() === ''}
+          onClick={() => { if (running) void stopTurn(); else void send() }}
+        >
+          {running ? (
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+              <rect x="3" y="3" width="10" height="10" rx="3" fill="currentColor" />
+            </svg>
+          ) : sending ? '发送中…' : '发送'}
         </button>
       </div>
       {sheet === 'model' && (
@@ -511,11 +672,19 @@ const MessageRow = memo(function MessageRow({ message, showToolCalls, showSystem
   showSystemMessages: boolean
 }) {
   // Injected user messages (sourceKind defined and not 'user') hide behind
-  // the system-message toggle. Assistant messages are never hidden.
+  // the system-message toggle.
   if (message.kind === 'user'
     && message.sourceKind !== undefined
     && message.sourceKind !== 'user'
     && !showSystemMessages) {
+    return null
+  }
+  const hasReasoning = message.kind === 'assistant' && message.reasoning !== undefined && message.reasoning !== ''
+  const hasTools = showToolCalls && message.kind === 'assistant' && message.tools !== undefined && message.tools.length > 0
+  const hasText = message.text !== ''
+  const hasFailTag = message.failed === true
+
+  if (!hasReasoning && !hasTools && !hasText && !hasFailTag) {
     return null
   }
   return (
@@ -527,7 +696,7 @@ const MessageRow = memo(function MessageRow({ message, showToolCalls, showSystem
         <ToolDisclosure tools={message.tools} />
       )}
       {message.kind === 'assistant'
-        ? <MarkdownText text={message.text} />
+        ? <MarkdownText text={message.text} pending={message.pending === true} />
         : <CollapsibleText text={message.text} />}
       {message.failed === true && <span className="chat-msg-failtag">本次回复失败</span>}
       <span className="chat-msg-time">{formatTime(message.time)}</span>
@@ -556,10 +725,10 @@ function ReasoningDisclosure({ text, pending }: { text: string; pending: boolean
   )
 }
 
-/** Collapsed-by-default tool-call disclosure: summary row + expandable details. */
+/** Collapsed-by-default tool-call disclosure: pill tag summary + card details (#529). */
 function ToolDisclosure({ tools }: { tools: ToolCallInfo[] }) {
   const [open, setOpen] = useState(false)
-  const names = [...new Set(tools.map(tool => tool.name))].join(' / ')
+  const uniqueNames = [...new Set(tools.map(tool => tool.name))]
   return (
     <div className={`chat-disclosure chat-tools${open ? ' chat-disclosure-open' : ''}`}>
       <button
@@ -570,15 +739,23 @@ function ToolDisclosure({ tools }: { tools: ToolCallInfo[] }) {
       >
         <span className="chat-disclosure-caret" aria-hidden>›</span>
         <span className="chat-disclosure-label">工具</span>
-        {!open && <span className="chat-disclosure-summary">{names}</span>}
+        {!open && (
+          <span className="chat-disclosure-summary chat-tool-pills">
+            {uniqueNames.map(name => (
+              <span key={name} className="chat-tool-pill">{name}</span>
+            ))}
+          </span>
+        )}
         <span className="chat-disclosure-count">{tools.length} 次</span>
       </button>
       {open && (
         <div className="chat-disclosure-body chat-tools-body">
           {tools.map((tool, index) => (
-            <div className="chat-tool-item" key={`${tool.callId}-${index}`}>
-              <span className="chat-tool-name">{tool.name}</span>
-              {tool.arguments !== undefined && <pre className="chat-tool-args">{tool.arguments}</pre>}
+            <div className="chat-tool-card" key={`${tool.callId}-${index}`}>
+              <span className="chat-tool-pill">{tool.name}</span>
+              {tool.arguments !== undefined && (
+                <pre className="chat-tool-args">{tool.arguments}</pre>
+              )}
             </div>
           ))}
         </div>
@@ -588,16 +765,77 @@ function ToolDisclosure({ tools }: { tools: ToolCallInfo[] }) {
 }
 
 /**
+ * Minimum interval between full markdown re-parses of a live (pending)
+ * assistant message. Every streamed chunk replaces the message object, and
+ * re-parsing the whole accumulated text per chunk turns a long reply into
+ * O(n^2) work on mobile. Pending text keeps the last parsed result visible
+ * and re-parses at most once per interval; the moment the turn closes the
+ * final text parses immediately, so terminal messages render exactly as
+ * before.
+ */
+export const STREAM_RENDER_INTERVAL_MS = 120
+
+/**
  * Assistant text rendered as GFM markdown (escape-first, protocol
  * allow-list — see markdown.ts). Long replies collapse by clamping the
  * rendered block height instead of slicing the source, so half-cut code
  * fences or tables never leak malformed markup into the DOM. User
  * messages stay plain text (CollapsibleText).
  */
-function MarkdownText({ text }: { text: string }) {
+function MarkdownText({ text, pending }: { text: string; pending: boolean }) {
   const [open, setOpen] = useState(false)
-  const html = useMemo(() => renderMarkdown(text), [text])
-  const long = text.length > LONG_TEXT_LIMIT
+  const [html, setHtml] = useState<string>(() => renderMarkdown(text))
+  /** Text of the last render actually applied to `html`. */
+  const renderedTextRef = useRef(text)
+  /** Newest streamed text, read by the trailing render at fire time. */
+  const latestTextRef = useRef(text)
+  /** Timestamp of the last applied parse (throttle window start). */
+  const lastRenderAtRef = useRef(performance.now())
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+
+  // Throttled parse for a live stream: skip parses while the newest text is
+  // already rendered, parse immediately once the throttle window elapsed,
+  // otherwise schedule one trailing render that picks up the newest text.
+  useEffect(() => {
+    latestTextRef.current = text
+    if (!pending) {
+      // Turn closed: terminal messages are never throttled, so cancel any
+      // scheduled stream render and parse the final text immediately.
+      if (timerRef.current !== undefined) {
+        clearTimeout(timerRef.current)
+        timerRef.current = undefined
+      }
+      if (text === renderedTextRef.current) return
+      lastRenderAtRef.current = performance.now()
+      renderedTextRef.current = text
+      setHtml(renderMarkdown(text))
+      return
+    }
+    if (text === renderedTextRef.current) return
+    const elapsed = performance.now() - lastRenderAtRef.current
+    if (elapsed >= STREAM_RENDER_INTERVAL_MS) {
+      lastRenderAtRef.current = performance.now()
+      renderedTextRef.current = text
+      setHtml(renderMarkdown(text))
+      return
+    }
+    if (timerRef.current === undefined) {
+      timerRef.current = setTimeout(() => {
+        timerRef.current = undefined
+        lastRenderAtRef.current = performance.now()
+        renderedTextRef.current = latestTextRef.current
+        setHtml(renderMarkdown(latestTextRef.current))
+      }, STREAM_RENDER_INTERVAL_MS - elapsed)
+    }
+  }, [text, pending])
+
+  // Cancel the trailing stream render if the row unmounts mid-stream.
+  useEffect(() => {
+    return () => {
+      if (timerRef.current !== undefined) clearTimeout(timerRef.current)
+    }
+  }, [])
+  const long = !pending && text.length > LONG_TEXT_LIMIT
   const collapsed = long && !open
   return (
     <div className={'chat-msg-text chat-md' + (collapsed ? ' chat-md-collapsed' : '')}>
@@ -628,7 +866,7 @@ function CollapsibleText({ text }: { text: string }) {
   )
 }
 
-const LONG_TEXT_LIMIT = 1600
+export const LONG_TEXT_LIMIT = 6000
 const LONG_TEXT_PREVIEW = 800
 
 /** Latest non-empty line of a streaming reasoning buffer. */
@@ -720,7 +958,7 @@ function ModelSheet({ sessionId, current, onCurrent, onClose }: {
   }
 
   const { data } = state
-  const selected = current ?? data.current
+  const selected = current ?? data.current ?? { provider: '', model: '' }
   const choices = data.groups.flatMap(group => group.models.map(model => ({ group, model })))
   const currentChoice = choices.find(choice => choice.group.id === selected.provider && choice.model.id === selected.model)
   const reasoning = currentChoice?.model.reasoning
@@ -743,7 +981,7 @@ function ModelSheet({ sessionId, current, onCurrent, onClose }: {
     <Sheet title="模型与思考强度" onClose={onClose}>
       {error !== undefined && <p className="sheet-error">{error}</p>}
       {error !== undefined && staleHostHint(error) !== undefined && <p className="sheet-hint">{staleHostHint(error)}</p>}
-      {data.failures.map(failure => (
+      {(data.failures ?? []).map(failure => (
         <p className="sheet-error" key={failure.id}>{failure.name}: {failure.message}</p>
       ))}
       {data.groups.length === 0 && choices.length === 0 && (
@@ -935,5 +1173,170 @@ function DisplaySheet({ showToolCalls, showSystemMessages, onToolCalls, onSystem
         </div>
       </div>
     </Sheet>
+  )
+}
+
+/* ── approval / question panels (#1025) ──────────────────────────────── */
+
+/** One pending tool approval card with allow/reject actions. */
+function ApprovalPanel({ approval, sessionId, onResolved }: {
+  approval: PendingApproval
+  sessionId: string
+  onResolved(approvalId: string): void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [panelError, setPanelError] = useState<string | undefined>(undefined)
+
+  const act = (outcome: 'allowed-once' | 'rejected'): void => {
+    if (busy) return
+    setBusy(true)
+    setPanelError(undefined)
+    void respondApproval(sessionId, approval.approvalId, outcome).then(
+      () => { onResolved(approval.approvalId) },
+      (reason: unknown) => {
+        setBusy(false)
+        setPanelError(reason instanceof Error ? reason.message : String(reason))
+      },
+    )
+  }
+
+  return (
+    <div className="chat-approval-panel" role="alert">
+      <div className="chat-approval-header">
+        <span className="chat-tool-pill">{approval.toolName}</span>
+        {approval.reason !== undefined && (
+          <span className="chat-approval-reason">{approval.reason}</span>
+        )}
+      </div>
+      {panelError !== undefined && <p className="chat-approval-error">{panelError}</p>}
+      <div className="chat-approval-actions">
+        <button
+          type="button"
+          className="chat-approval-allow"
+          disabled={busy}
+          onClick={() => { act('allowed-once') }}
+        >
+          {busy ? '提交中…' : '允许一次'}
+        </button>
+        <button
+          type="button"
+          className="chat-approval-reject"
+          disabled={busy}
+          onClick={() => { act('rejected') }}
+        >
+          拒绝
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** Question panel: renders one or more questions with option pickers and a submit button. */
+function QuestionPanel({ questions, sessionId, onResolved }: {
+  questions: PendingQuestionItem[]
+  sessionId: string
+  onResolved(): void
+}) {
+  const [selections, setSelections] = useState<Map<string, { selected: string[]; custom: string }>>(
+    () => new Map(questions.map(q => [q.id, { selected: [], custom: '' }])),
+  )
+  const [busy, setBusy] = useState(false)
+  const [panelError, setPanelError] = useState<string | undefined>(undefined)
+
+  const toggle = (questionId: string, label: string, multi: boolean): void => {
+    setSelections(previous => {
+      const next = new Map(previous)
+      const entry = next.get(questionId) ?? { selected: [], custom: '' }
+      if (multi) {
+        const set = new Set(entry.selected)
+        if (set.has(label)) set.delete(label); else set.add(label)
+        next.set(questionId, { ...entry, selected: [...set] })
+      } else {
+        next.set(questionId, { ...entry, selected: [label] })
+      }
+      return next
+    })
+  }
+
+  const setCustom = (questionId: string, value: string): void => {
+    setSelections(previous => {
+      const next = new Map(previous)
+      const entry = next.get(questionId) ?? { selected: [], custom: '' }
+      next.set(questionId, { ...entry, custom: value })
+      return next
+    })
+  }
+
+  const submit = (): void => {
+    if (busy) return
+    setBusy(true)
+    setPanelError(undefined)
+    const answers = questions.map(q => {
+      const entry = selections.get(q.id) ?? { selected: [], custom: '' }
+      return {
+        id: q.id,
+        selected: entry.selected,
+        ...(entry.custom.trim() !== '' ? { custom: entry.custom.trim() } : {}),
+      }
+    })
+    void respondQuestion(sessionId, answers).then(
+      () => { onResolved() },
+      (reason: unknown) => {
+        setBusy(false)
+        setPanelError(reason instanceof Error ? reason.message : String(reason))
+      },
+    )
+  }
+
+  return (
+    <div className="chat-question-panel" role="form" aria-label="问题">
+      {questions.map(q => {
+        const entry = selections.get(q.id) ?? { selected: [], custom: '' }
+        return (
+          <div className="chat-question-group" key={q.id}>
+            {q.header !== undefined && <div className="chat-question-header">{q.header}</div>}
+            <div className="chat-question-text">{q.question}</div>
+            {q.detail !== undefined && <div className="chat-question-detail">{q.detail}</div>}
+            {q.options !== undefined && q.options.length > 0 && (
+              <div className="chat-question-options" role="group" aria-label={q.question}>
+                {q.options.map(option => {
+                  const checked = entry.selected.includes(option.label)
+                  return (
+                    <label key={option.label} className={`chat-question-option${checked ? ' chat-question-option-selected' : ''}`}>
+                      <input
+                        type={q.multiSelect ? 'checkbox' : 'radio'}
+                        name={`q-${q.id}`}
+                        checked={checked}
+                        onChange={() => { toggle(q.id, option.label, q.multiSelect === true) }}
+                      />
+                      <span className="chat-question-option-label">{option.label}</span>
+                      {option.description !== undefined && (
+                        <span className="chat-question-option-desc">{option.description}</span>
+                      )}
+                    </label>
+                  )
+                })}
+              </div>
+            )}
+            <textarea
+              className="chat-question-custom"
+              placeholder="自定义回答（可选）"
+              rows={2}
+              value={entry.custom}
+              onChange={(e) => { setCustom(q.id, e.target.value) }}
+            />
+          </div>
+        )
+      })}
+      {panelError !== undefined && <p className="chat-approval-error">{panelError}</p>}
+      <button
+        type="button"
+        className="chat-question-submit"
+        disabled={busy}
+        onClick={submit}
+      >
+        {busy ? '提交中…' : '提交回答'}
+      </button>
+    </div>
   )
 }

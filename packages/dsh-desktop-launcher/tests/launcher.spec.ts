@@ -34,7 +34,7 @@ describe('launcher script rendering', () => {
     expect(script).toContain("$dshCommand = 'dsh'")
     expect(script).toContain("$url = 'http://127.0.0.1:3080'")
     expect(script).toContain("$profile = 'web'")
-    expect(script).toContain("$arguments += @('--profile', $profile)")
+    expect(script).toContain("@('--profile', $profile, '--no-open')")
     expect(script).toContain('Start-Process $url')
     expect(script).toContain('Start-Sleep -Milliseconds 250')
     expect(script).toContain('DeepSeek Harness')
@@ -45,17 +45,17 @@ describe('launcher script rendering', () => {
     expect(script).toContain("-match '\\.(?:cmd|exe|bat|com)$'")
     expect(script).toContain("Start-Process -FilePath 'powershell.exe'")
     expect(script).toContain("@('-NoProfile', '-File', $command.Source)")
-    expect(script).toContain("[guid]::NewGuid().ToString('N')")
-    expect(script).toContain("SetEnvironmentVariable('DSH_DESKTOP_LAUNCHER_TOKEN', $launchToken")
-    expect(script).toContain('Start-Process $managedUrl')
-    expect(script.indexOf('if (Test-DshUrl) {')).toBeLessThan(script.indexOf("SetEnvironmentVariable('DSH_DESKTOP_LAUNCHER_TOKEN'"))
+    expect(script).toContain("@('web', '--no-open')")
+    expect(script).toContain('Start-Process $url')
+    expect(script).not.toContain('DSH_DESKTOP_LAUNCHER_TOKEN')
+    expect(script).not.toContain('$managedUrl')
   })
 
   it('omits the profile flag when no profile is set', () => {
     const script = renderLauncherScript('win32', { dshCommand: 'dsh', url: 'http://127.0.0.1:3080' })
     expect(script).toContain("$profile = ''")
-    expect(script).toContain("$arguments = @('web')")
-    expect(script).toContain("if ($profile -ne '') {")
+    expect(script).toContain("@('web', '--no-open')")
+    expect(script).toContain("if ($profile -eq '')")
   })
 
   it('renders POSIX launchers with the platform open command', () => {
@@ -64,8 +64,10 @@ describe('launcher script rendering', () => {
     expect(mac).toContain('command -v "$DASH"')
     const linux = renderLauncherScript('linux', { dshCommand: 'dsh', url: 'http://127.0.0.1:3080' })
     expect(linux).toContain('xdg-open "$URL"')
-    expect(linux).toContain('DSH_DESKTOP_LAUNCHER_TOKEN="$LAUNCH_TOKEN"')
-    expect(linux).toContain('xdg-open "$MANAGED_URL"')
+    expect(linux).toContain('"$DASH" web --no-open')
+    expect(linux).toContain('"$DASH" --profile "$PROFILE" --no-open')
+    expect(linux).not.toContain('DSH_DESKTOP_LAUNCHER_TOKEN')
+    expect(linux).not.toContain('$MANAGED_URL')
   })
 
   it('escapes single quotes in embedded values', () => {
@@ -87,15 +89,16 @@ describe('desktop file rendering', () => {
     expect(withIcon).not.toContain('Icon=utilities-terminal')
   })
 
-  it('renders a Windows shortcut installer with the icon location', () => {
+  it('renders a Windows shortcut installer with the icon location and working directory', () => {
     const ps = renderShortcutInstaller({
       launcherPath: 'C:/Users/u/.dsh/desktop-launcher/launcher.ps1',
       desktopPath: 'C:/Users/u/Desktop/DSH.lnk',
-      homeDir: 'C:/Users/u',
+      workingDirectory: 'C:/Users/u/.dsh/desktop-launcher',
       iconLocation: 'C:/Users/u/.dsh/desktop-launcher/dsh.ico',
     })
     expect(ps).toContain("$shortcut.TargetPath = 'powershell.exe'")
     expect(ps).toContain('-WindowStyle Hidden -File C:/Users/u/.dsh/desktop-launcher/launcher.ps1')
+    expect(ps).toContain("$shortcut.WorkingDirectory = 'C:/Users/u/.dsh/desktop-launcher'")
     expect(ps).toContain("$shortcut.IconLocation = 'C:/Users/u/.dsh/desktop-launcher/dsh.ico'")
     expect(ps).toContain("$shortcut.Save()")
   })
@@ -107,6 +110,7 @@ describe('desktop file rendering', () => {
       homeDir: 'C:/',
       iconLocation: 'powershell.exe,0',
     })
+    expect(ps).toContain("$shortcut.WorkingDirectory = 'C:/'")
     expect(ps).toContain("$shortcut.IconLocation = 'powershell.exe,0'")
   })
 })

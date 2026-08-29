@@ -82,9 +82,6 @@ const WORKSPACE_LINE_PREFIX = '\n\nYour working directory is '
  */
 const DEFAULT_MESSAGE_SOURCES = ['user', 'goal']
 
-/** Message-source kinds delayed after promotion. */
-const DEFAULT_DEFERRED_SOURCES = []
-
 function stringList(value, field, fallback) {
   if (value === undefined) return [...fallback]
   if (!Array.isArray(value) || value.length === 0 || value.some(item => typeof item !== 'string' || item.length === 0)) {
@@ -276,7 +273,7 @@ function stateFor(session) {
  * PTC Mode presentation is disposed so the next assembly sees the native
  * catalog and the phase-1 filter can narrow it again.
  */
-function resetToControlled(state) {
+function resetToControlled(state, session) {
   if (typeof state.presentationDisposer === 'function') {
     try {
       state.presentationDisposer()
@@ -285,6 +282,10 @@ function resetToControlled(state) {
       // next promotion re-declares PTC Mode anyway.
     }
     state.presentationDisposer = undefined
+    const agent = session !== undefined ? agentBySession.get(session) : undefined
+    if (agent?.ctx && typeof agent.ctx.emit === 'function') {
+      agent.ctx.emit('tools/presentation-changed', { mode: 'native', session: session?.id })
+    }
   }
   state.promoted = false
   state.toolCalled = false
@@ -305,7 +306,7 @@ function resetToControlled(state) {
  */
 function applyPresentation(agent, state, policy) {
   if (state.presentationApplied || policy.promotedPresentation !== 'code') return
-  const tools = agent.ctx.tools
+  const tools = agent?.ctx?.tools
   // Latch only after the switch really happened: without a tools view there
   // is nothing to present, and latching early would skip PTC Mode forever.
   if (tools === undefined) return
@@ -314,6 +315,11 @@ function applyPresentation(agent, state, policy) {
   // let the phase-1 catalog filter see the native tool list again.
   state.presentationDisposer = tools.presentAs('code')
   state.presentationApplied = true
+  // #1128: Broadcast presentation switch so external discipline / analysis
+  // plugins decouple presentation mode from tool failure detection.
+  if (typeof agent?.ctx?.emit === 'function') {
+    agent.ctx.emit('tools/presentation-changed', { mode: 'code', session: agent.session?.id })
+  }
 }
 
 /**
@@ -345,7 +351,7 @@ function scanEvents(state, session) {
       // past this boundary (the `next` pointer stays, so events before the
       // boundary never re-promote). Handled inside the scan so cold starts
       // reconstruct the same phase from the durable log.
-      resetToControlled(state)
+      resetToControlled(state, session)
     } else if (event.type === 'tool/call') {
       state.toolCalled = true
     } else if (event.type === 'step/start') {
@@ -373,6 +379,8 @@ function refresh(agent, policy) {
   return state
 }
 
+const PTC_INSTRUCTION = '\n\nNote: You are in Programmatic Tool Calling (PTC) mode. All actions (running shell commands, file operations, web tools) MUST be performed via the `run_code` tool by writing and executing TypeScript/JavaScript programs. Do not attempt to invoke tools like `bash` or `str_replace_editor` directly on the wire.'
+
 /**
  * Append the session's working directory to the persona section of a promoted
  * assembly. Returns the assembly unchanged when there is no persona section,
@@ -392,6 +400,25 @@ function withWorkspaceLine(assembly, agent) {
     ...assembly,
     sections: assembly.sections.map(section => section === persona
       ? { ...section, text: `${persona.text}${line}` }
+      : section),
+  }
+}
+
+/**
+ * Append PTC mode instructions to the persona section when promoted to code presentation.
+ */
+function withPtcInstruction(assembly, policy) {
+  if (policy?.promotedPresentation !== 'code') return assembly
+  if (!Array.isArray(assembly.sections)) return assembly
+  const persona = assembly.sections.find(section =>
+    PERSONA_SECTION_NAMES.has(section?.name)
+    && typeof section?.text === 'string'
+    && !section.text.includes('PTC) mode'))
+  if (persona === undefined) return assembly
+  return {
+    ...assembly,
+    sections: assembly.sections.map(section => section === persona
+      ? { ...section, text: `${persona.text}${PTC_INSTRUCTION}` }
       : section),
   }
 }
@@ -454,7 +481,7 @@ export function apply(ctx, config) {
   // start reconstructs the same controlled phase from the durable log.
   ctx.on('session/event', (session, event) => {
     if (event.type === 'compaction/end') {
-      resetToControlled(stateFor(session))
+      resetToControlled(stateFor(session), session)
       return
     }
     if (event.type !== 'step/end' && event.type !== 'turn/end') return
@@ -480,7 +507,7 @@ export function apply(ctx, config) {
     const agent = context.agent
     if (agent === undefined) return assembled
     const state = refresh(agent, policy)
-    if (state.promoted) return withWorkspaceLine(assembled, agent)
+    if (state.promoted) return withPtcInstruction(withWorkspaceLine(assembled, agent), policy)
 
     const available = new Set(assembled.tools.map(tool => tool.name))
     const selectedShells = shellTools.filter(toolName => available.has(toolName))

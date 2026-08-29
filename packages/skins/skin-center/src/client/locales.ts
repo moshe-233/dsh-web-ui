@@ -46,6 +46,7 @@ export type SkinCenterKey =
   | 'wallpaperLoadError'
   | 'wallpaperLibraryFound'
   | 'wallpaperLibraryManual'
+  | 'wallpaperLibrarySystem'
   | 'wallpaperRefresh'
   | 'wallpaperMode'
   | 'wallpaperModeLive'
@@ -56,6 +57,7 @@ export type SkinCenterKey =
   | 'wallpaperFitFill'
   | 'wallpaperClear'
   | 'wallpaperDim'
+  | 'wallpaperOpacity'
   | 'wallpaperBlur'
   | 'wallpaperPauseHidden'
   | 'wallpaperSound'
@@ -67,16 +69,20 @@ export type SkinCenterKey =
   | 'wallpaperRemove'
   | 'wallpaperUpdateAvailable'
   | 'wallpaperEmpty'
-  | 'wallpaperLegal'
   | 'wallpaperTypeVideo'
   | 'wallpaperTypeWeb'
   | 'wallpaperTypeScene'
   | 'wallpaperTypeApp'
+  | 'wallpaperTypeImage'
+  | 'wallpaperLoadMore'
   | 'wallpaperDirs'
   | 'wallpaperDirsEmpty'
   | 'wallpaperDirsHint'
   | 'wallpaperDirPlaceholder'
   | 'wallpaperDirAdd'
+  | 'wallpaperDirBrowse'
+  | 'wallpaperDirBrowseHint'
+  | 'wallpaperDirBrowseFailed'
   | 'customThemeTitle'
   | 'customThemeTagline'
   | 'customThemeEdit'
@@ -91,6 +97,25 @@ export type SkinCenterKey =
   | 'customThemeReset'
   | 'customThemeResetHint'
   | 'customThemeSaveFailed'
+  | 'uninstall'
+  | 'uninstalling'
+  | 'uninstallConfirm'
+  | 'uninstallFailed'
+  | 'verifyIntegrity'
+  | 'verifyingIntegrity'
+  | 'verifyAllPassed'
+  | 'verifyFoundIssues'
+  | 'integrityValid'
+  | 'integrityTampered'
+  | 'integrityMissing'
+  | 'integrityHooksRefused'
+  | 'cancel'
+  | 'confirm'
+  | 'verifyRepaired'
+  | 'verifyRepairFailed'
+  | 'repair'
+  | 'repairing'
+  | 'repaired'
 
 export const en: Record<SkinCenterKey, string> = {
   title: 'Skin Center',
@@ -133,6 +158,7 @@ export const en: Record<SkinCenterKey, string> = {
   wallpaperLoadError: 'Wallpaper library failed to load',
   wallpaperLibraryFound: 'Wallpaper Engine library detected',
   wallpaperLibraryManual: 'Manual folders only (no Wallpaper Engine install found; set folders in the skin-wallpaper settings)',
+  wallpaperLibrarySystem: 'macOS wallpapers detected (aerials and Desktop Pictures)',
   wallpaperRefresh: 'Refresh',
   wallpaperMode: 'Render mode',
   wallpaperModeLive: 'Live',
@@ -143,6 +169,7 @@ export const en: Record<SkinCenterKey, string> = {
   wallpaperFitFill: 'Stretch',
   wallpaperClear: 'Turn off wallpaper',
   wallpaperDim: 'Wallpaper dimming',
+  wallpaperOpacity: 'Wallpaper opacity',
   wallpaperBlur: 'Wallpaper blur',
   wallpaperPauseHidden: 'Pause when window hidden',
   wallpaperSound: 'Wallpaper sound',
@@ -154,16 +181,20 @@ export const en: Record<SkinCenterKey, string> = {
   wallpaperRemove: 'Remove',
   wallpaperUpdateAvailable: 'The workshop original changed since import — update the local copy',
   wallpaperEmpty: 'No wallpapers found. Subscribe in the Wallpaper Engine workshop, or add manual folders to the skin-wallpaper settings.',
-  wallpaperLegal: 'Wallpapers belong to their Workshop authors. Everything stays on this machine for personal use; nothing is uploaded or shared.',
   wallpaperTypeVideo: 'Video',
   wallpaperTypeWeb: 'Web',
   wallpaperTypeScene: 'Scene (static)',
   wallpaperTypeApp: 'Unsupported',
+  wallpaperTypeImage: 'Image',
+  wallpaperLoadMore: 'Load more',
   wallpaperDirs: 'Manual folders',
   wallpaperDirsEmpty: 'No manual folders yet.',
   wallpaperDirsHint: 'No Wallpaper Engine (e.g. macOS)? Point a folder at any .mp4/.webm files, a wallpaper project folder, or a folder of projects — they become your wallpaper library.',
   wallpaperDirPlaceholder: '/path/to/wallpapers or ~/Movies/wallpapers',
   wallpaperDirAdd: 'Add',
+  wallpaperDirBrowse: 'Browse…',
+  wallpaperDirBrowseHint: 'Pick a folder with the system file manager (Finder / Explorer)',
+  wallpaperDirBrowseFailed: 'Could not open the system folder picker — type the path manually instead',
   customThemeTitle: 'Custom theme',
   customThemeTagline: 'A separately saved palette derived from the official default theme.',
   customThemeEdit: 'Edit',
@@ -178,10 +209,29 @@ export const en: Record<SkinCenterKey, string> = {
   customThemeReset: 'Restore current mode default',
   customThemeResetHint: 'Only resets the selected light or dark profile.',
   customThemeSaveFailed: 'Could not save custom theme changes.',
+  uninstall: 'Uninstall',
+  uninstalling: 'Uninstalling…',
+  uninstallConfirm: 'Are you sure you want to uninstall "{name}"? Local files will be deleted.',
+  uninstallFailed: 'Uninstall failed',
+  verifyIntegrity: 'Verify integrity',
+  verifyingIntegrity: 'Verifying…',
+  verifyAllPassed: 'All {count} installed skin(s) passed integrity verification',
+  verifyFoundIssues: 'Found {count} skin(s) with integrity issues',
+  integrityValid: 'Verified',
+  integrityTampered: 'Modified',
+  integrityMissing: 'Missing files',
+  integrityHooksRefused: 'Hooks refused',
+  cancel: 'Cancel',
+  confirm: 'Confirm',
+  verifyRepaired: 'Successfully repaired {count} skin(s) with integrity issues',
+  verifyRepairFailed: 'Failed to repair {count} skin(s)',
+  repair: 'Repair',
+  repairing: 'Repairing…',
+  repaired: 'Repaired',
 }
 
 export const zh: Record<SkinCenterKey, string> = {
-  title: '皮肤中心',
+  title: '皮肤',
   cardDescription: '在 GUI 内即时试穿任意皮肤，退出即完全还原；应用一键完成并自动刷新。',
   enabled: '启用皮肤中心',
   enabledHint: '关闭后停用试穿、应用与背景控件，重新打开即恢复。',
@@ -221,6 +271,7 @@ export const zh: Record<SkinCenterKey, string> = {
   wallpaperLoadError: '壁纸库加载失败',
   wallpaperLibraryFound: '已检测到 Wallpaper Engine 壁纸库',
   wallpaperLibraryManual: '仅手动目录（未检测到 Wallpaper Engine 安装，可在 skin-wallpaper 设置里添加目录）',
+  wallpaperLibrarySystem: '已检测到 macOS 系统壁纸（航拍与桌面图片）',
   wallpaperRefresh: '刷新',
   wallpaperMode: '渲染模式',
   wallpaperModeLive: '动态',
@@ -231,6 +282,7 @@ export const zh: Record<SkinCenterKey, string> = {
   wallpaperFitFill: '拉伸铺满',
   wallpaperClear: '关闭壁纸',
   wallpaperDim: '壁纸暗化',
+  wallpaperOpacity: '壁纸不透明度',
   wallpaperBlur: '壁纸模糊',
   wallpaperPauseHidden: '窗口隐藏时暂停',
   wallpaperSound: '壁纸声音',
@@ -242,16 +294,20 @@ export const zh: Record<SkinCenterKey, string> = {
   wallpaperRemove: '移除',
   wallpaperUpdateAvailable: '工坊原件在导入后有更新——同步更新本地副本',
   wallpaperEmpty: '未发现壁纸。可先在 Wallpaper Engine 创意工坊订阅，或在 skin-wallpaper 设置里添加手动目录。',
-  wallpaperLegal: '壁纸素材版权归创意工坊作者所有，仅供本机个人使用，不上传、不分享。',
   wallpaperTypeVideo: '视频',
   wallpaperTypeWeb: '网页',
   wallpaperTypeScene: '场景(静态)',
   wallpaperTypeApp: '不支持',
+  wallpaperTypeImage: '静态图片',
+  wallpaperLoadMore: '加载更多',
   wallpaperDirs: '手动目录',
   wallpaperDirsEmpty: '还没有手动目录。',
   wallpaperDirsHint: '没有 Wallpaper Engine（如 macOS）？把任意 .mp4/.webm 视频、单个壁纸项目文件夹或项目合集文件夹加进来，就是你的壁纸库。',
   wallpaperDirPlaceholder: '/path/to/wallpapers 或 ~/Movies/wallpapers',
   wallpaperDirAdd: '添加',
+  wallpaperDirBrowse: '浏览…',
+  wallpaperDirBrowseHint: '通过系统文件管理器（访达 / 资源管理器）选择文件夹',
+  wallpaperDirBrowseFailed: '无法打开系统目录选择框——请手动输入路径',
   customThemeTitle: '自定义主题',
   customThemeTagline: '基于官方默认主题生成并独立保存的配色方案。',
   customThemeEdit: '编辑',
@@ -266,4 +322,23 @@ export const zh: Record<SkinCenterKey, string> = {
   customThemeReset: '恢复当前模式默认',
   customThemeResetHint: '只重置当前选择的浅色或深色配置。',
   customThemeSaveFailed: '自定义主题修改保存失败。',
+  uninstall: '卸载',
+  uninstalling: '卸载中…',
+  uninstallConfirm: '确定要卸载皮肤「{name}」吗？本地文件将被永久删除。',
+  uninstallFailed: '卸载失败',
+  verifyIntegrity: '验证完整性',
+  verifyingIntegrity: '正在验证…',
+  verifyAllPassed: '所有 {count} 款已安装皮肤完整性正常',
+  verifyFoundIssues: '发现 {count} 款皮肤存在完整性异常',
+  verifyRepaired: '已自动修复 {count} 款皮肤的完整性异常',
+  verifyRepairFailed: '{count} 款皮肤自动修复失败',
+  repair: '修复',
+  repairing: '修复中…',
+  repaired: '已修复',
+  integrityValid: '完整',
+  integrityTampered: '文件已修改',
+  integrityMissing: '缺少文件',
+  integrityHooksRefused: 'Hooks 已拒绝',
+  cancel: '取消',
+  confirm: '确定',
 }

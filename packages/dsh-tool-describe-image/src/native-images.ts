@@ -22,6 +22,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { settingsNamespace, type SettingsNamespace, type SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import { isLoopbackRequest } from './loopback.ts'
+import { readJsonBody, writeJson } from './http.ts'
 import { optionalService, UNKNOWN_CAPABILITY, type InvalidatableRouteResolver, type ModelImageCapability, type RouteCapabilityResolver } from './model-capability.ts'
 
 /** The DeepSeek adapter's settings namespace. */
@@ -64,14 +65,27 @@ interface AdapterDescriptor {
   revision?: number
 }
 
+/** Resolve the adapter settings namespace for one route. */
+function adapterNamespaceForRoute(route: { provider: string; model: string } | undefined): SettingsNamespace {
+  if (route && route.provider) {
+    return settingsNamespace(`llm-${route.provider}`)
+  }
+  return LLM_DEEPSEEK_SETTINGS_NAMESPACE
+}
+
 /** Resolve the adapter namespace descriptor (undefined when unregistered). */
-function adapterDescriptor(settings: SettingsFace | undefined): AdapterDescriptor | undefined {
-  if (settings === undefined) return undefined
-  const descriptor = settings.describe({ redactSecrets: true })
-    .find((candidate) => String(candidate.ns) === String(LLM_DEEPSEEK_SETTINGS_NAMESPACE))
-  if (descriptor === undefined) return undefined
-  if (settings.writable === false) return undefined
-  return { value: descriptor.value, revision: descriptor.revision }
+function adapterDescriptor(settings: SettingsFace | undefined, preferredNs?: SettingsNamespace): { descriptor?: AdapterDescriptor; ns: SettingsNamespace } {
+  const targetNs = preferredNs ?? LLM_DEEPSEEK_SETTINGS_NAMESPACE
+  if (settings === undefined) return { ns: targetNs }
+  const descriptors = settings.describe({ redactSecrets: true })
+  let match = descriptors.find((candidate) => String(candidate.ns) === String(targetNs))
+  let effectiveNs = targetNs
+  if (match === undefined && targetNs !== LLM_DEEPSEEK_SETTINGS_NAMESPACE) {
+    match = descriptors.find((candidate) => String(candidate.ns) === String(LLM_DEEPSEEK_SETTINGS_NAMESPACE))
+    if (match !== undefined) effectiveNs = LLM_DEEPSEEK_SETTINGS_NAMESPACE
+  }
+  if (match === undefined || settings.writable === false) return { ns: effectiveNs }
+  return { descriptor: { value: match.value, revision: match.revision }, ns: effectiveNs }
 }
 
 /** The catalogued modalities of one model, or undefined when absent. */
@@ -100,7 +114,8 @@ function currentRoute(ctx: Context): { provider: string; model: string } | undef
  */
 export async function readNativeImageState(ctx: Context, resolver: RouteCapabilityResolver): Promise<NativeImageState> {
   const route = currentRoute(ctx)
-  const descriptor = adapterDescriptor(optionalService<SettingsFace>(ctx, 'settings'))
+  const preferredNs = adapterNamespaceForRoute(route)
+  const { descriptor } = adapterDescriptor(optionalService<SettingsFace>(ctx, 'settings'), preferredNs)
   const capability = route === undefined ? UNKNOWN_CAPABILITY : await resolver(route)
   return {
     ...(route === undefined ? {} : { provider: route.provider, model: route.model }),
@@ -126,50 +141,39 @@ export async function setNativeImageEnabled(ctx: Context, enabled: boolean, reso
   const route = currentRoute(ctx)
   if (route === undefined) throw new Error('native-images: no agent default model selection')
   const settings = optionalService<SettingsFace>(ctx, 'settings')
-  const descriptor = adapterDescriptor(settings)
-  if (descriptor === undefined || settings === undefined) {
-    throw new Error('native-images: the llm-deepseek settings namespace is not available')
+  if (settings === undefined) throw new Error('native-images: settings service not available')
+  const preferredNs = adapterNamespaceForRoute(route)
+  const { descriptor, ns } = adapterDescriptor(settings, preferredNs)
+  if (descriptor === undefined) {
+    throw new Error(`native-images: settings namespace '${String(ns)}' is not available`)
   }
   const value = descriptor.value as { models?: unknown } | null | undefined
   const models = Array.isArray(value?.models) ? value.models as CatalogModelEntry[] : []
   const index = models.findIndex((entry) => entry.id === route.model)
   const modalities = enabled ? ['text', 'image'] : ['text']
-  const next = models.map((entry) => entry)
+  const next = models.map((entry) => ({ ...entry }))
   if (index === -1) {
     next.push({ id: route.model, inputModalities: modalities })
   } else {
     next[index] = { ...next[index], inputModalities: modalities }
   }
-  await settings.mutate(LLM_DEEPSEEK_SETTINGS_NAMESPACE, [
-    { op: 'set', path: ['models'], value: next },
-  ], descriptor.revision)
+  try {
+    await settings.mutate(ns, [
+      { op: 'set', path: ['models'], value: next },
+    ], descriptor.revision)
+  } catch (error) {
+    const fresh = adapterDescriptor(settings, ns).descriptor
+    if (fresh?.revision !== undefined) {
+      await settings.mutate(ns, [
+        { op: 'set', path: ['models'], value: next },
+      ], fresh.revision)
+    } else {
+      throw error
+    }
+  }
   // Drop the cached capability verdict so the next read (and the POST
   // envelope) reflects the catalog just written.
   resolver?.invalidate(route)
-}
-
-/** One JSON envelope. */
-function json(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body)
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'referrer-policy': 'no-referrer' })
-  res.end(payload)
-}
-
-/** Read a small JSON request body (undefined when too large or unparseable). */
-async function readJsonBody(req: IncomingMessage, cap: number): Promise<unknown> {
-  const chunks: Buffer[] = []
-  let size = 0
-  for await (const chunk of req) {
-    const buffer = chunk as Buffer
-    size += buffer.length
-    if (size > cap) return undefined
-    chunks.push(buffer)
-  }
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
-  } catch {
-    return undefined
-  }
 }
 
 /**
@@ -190,7 +194,7 @@ interface NativeImageRoute {
 export function registerNativeImageRoutes(ctx: Context, resolver: InvalidatableRouteResolver): NativeImageRoute[] {
   const guard = (req: IncomingMessage, res: ServerResponse): boolean => {
     if (!isLoopbackRequest(req)) {
-      json(res, 403, { ok: false, code: 'forbidden', message: 'loopback only' })
+      writeJson(res, 403, { ok: false, code: 'forbidden', message: 'loopback only' })
       return false
     }
     return true
@@ -202,24 +206,24 @@ export function registerNativeImageRoutes(ctx: Context, resolver: InvalidatableR
       handler: async (req, res) => {
         if (!guard(req, res)) return
         if (req.method !== 'GET' && req.method !== 'POST') {
-          json(res, 405, { ok: false, code: 'method-not-allowed', message: 'method not allowed: ' + (req.method ?? '') })
+          writeJson(res, 405, { ok: false, code: 'method-not-allowed', message: 'method not allowed: ' + (req.method ?? '') })
           return
         }
         if (req.method === 'GET') {
-          json(res, 200, { ok: true, value: await readNativeImageState(ctx, resolver) })
+          writeJson(res, 200, { ok: true, value: await readNativeImageState(ctx, resolver) })
           return
         }
-        const body = await readJsonBody(req, 4096)
+        const body = await readJsonBody(req, { maxBytes: 4096 })
         if (body === null || typeof body !== 'object' || typeof (body as { enabled?: unknown }).enabled !== 'boolean') {
-          json(res, 400, { ok: false, code: 'bad-request', message: 'native-images: expected { enabled: boolean }' })
+          writeJson(res, 400, { ok: false, code: 'bad-request', message: 'native-images: expected { enabled: boolean }' })
           return
         }
         try {
           await setNativeImageEnabled(ctx, (body as { enabled: boolean }).enabled, resolver)
-          json(res, 200, { ok: true, value: await readNativeImageState(ctx, resolver) })
+          writeJson(res, 200, { ok: true, value: await readNativeImageState(ctx, resolver) })
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
-          json(res, /revision|conflict/i.test(message) ? 409 : 400, { ok: false, code: 'settings-rejected', message })
+          writeJson(res, /revision|conflict/i.test(message) ? 409 : 400, { ok: false, code: 'settings-rejected', message })
         }
       },
     },

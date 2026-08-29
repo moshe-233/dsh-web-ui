@@ -34,6 +34,7 @@ installation.
 - The Doctor Supervisor runs as a per-user background service. It classifies
   exits into user stops, task completion and real failures, applies the
   crash-loop circuit breaker, and owns rescue scheduling.
+- The Doctor Launcher detects the legacy aggregate package before starting DSH and automatically migrates `@linxin666/dsh-web-ui-all` to `@linxin666/dsh-web-all` when `autoMigrate` is enabled (default true) and the target package is available; migration goes through the official `dsh plugin` CLI with manifest/lockfile backups and a `--dump-config` gate.
 - The Doctor Launcher relays `dsh` arguments verbatim to the real DSH
   executable, forwards stdin, stdout, stderr and signals, records startup
   intent and exit facts, and only then reports an incident.
@@ -59,7 +60,7 @@ Profile package.json and cordis.patch.yml are only touched through the official
 ### From npm (family first)
 
 ```sh
-dsh plugin --profile web add @linxin666/dsh-web-ui-all@latest
+dsh plugin --profile web add @linxin666/dsh-web-all@latest
 ```
 
 ### As a standalone bundle
@@ -71,8 +72,8 @@ dsh plugin --profile web add @linxin666/dsh-doctor@latest
 ### From the repository (development)
 
 ```sh
-git clone https://github.com/zhu1090093659/dsh-web-ui.git
-cd dsh-web-ui
+git clone https://github.com/zhu1090093659/dsh-web.git
+cd dsh-web
 pnpm install
 pnpm -r build
 dsh plugin --profile web add link:$(pwd)/packages/dsh-doctor
@@ -85,15 +86,7 @@ and the user-level service adapters.
 
 ## Enable
 
-After the Doctor card switches enable rescue mode on, the host half mounts the
-`/api/doctor/*` endpoints and starts reporting heartbeats. When the per-user
-Doctor Supervisor service is not installed yet, the host status shows Doctor
-offline and the Service and capsule card offers Install now: it regenerates and
-registers the user-level service from the current package (previous
-registration dropped first, then deploy and restart, idempotent), waits for
-the Supervisor to answer, and refreshes the rescue capsule when it is missing
-or pinned to a different Doctor version. The button shows Installing/repairing
-while the verb runs; failures surface the error code and stderr.
+When rescue mode is enabled, the host mounts `/api/doctor/*`, persists the effective protection policy, and reconciles the Supervisor service, package version, install path, and rescue capsule in the background without blocking Web startup. Disabling stops heartbeats and pauses automatic Supervisor intervention while retaining the service and capsule. An explicit uninstall writes a suppression marker, so later host starts never resurrect the service; Install now clears that marker. The console button remains available as a manual retry and repair entry point.
 
 ## Update
 
@@ -116,6 +109,7 @@ The `dsh-doctor` binary exposes the operational commands:
 | --- | --- |
 | `dsh-doctor supervisor` | run the Supervisor in the foreground |
 | `dsh-doctor launch [dsh args...]` | relay one `dsh` invocation under supervision |
+| `dsh-doctor migrate [profile]` | run the deterministic legacy aggregate migration directly |
 | `dsh-doctor status` | print the Supervisor snapshot as JSON |
 | `dsh-doctor provision [profile] [--no-credentials]` | provision or refresh the rescue capsule (mirrors provider config and credentials with 0600; pinned to the current package version by default; `DSH_DOCTOR_PACKAGE`, `--no-credentials` and `DSH_DOCTOR_CREDENTIALS=off` adjust it) |
 | `dsh-doctor snapshot [profile]` | capture one profile snapshot |
@@ -135,9 +129,10 @@ The host settings namespace is `doctor`:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `true` | master switch; routes mount only when enabled |
-| `fullProtection` | `true` | install the Supervisor and launcher on enable |
-| `autoRepair` | `true` | allow deterministic repairs to promote after verification |
+| `enabled` | `true` | master switch; mounts routes and reconciles deployment when enabled, pauses without uninstalling when disabled |
+| `fullProtection` | `true` | managed protection: heartbeat, incident recording and circuit breaking; off is observation mode |
+| `autoRepair` | `false` | promote after isolated gates; off keeps a staged candidate pending explicit confirmation |
+| `autoMigrate` | `true` | migrates the legacy aggregate before startup; only the known `dsh-web-ui-all` -> `dsh-web-all` mapping is active |
 | `heartbeatIntervalMs` | `5000` | host heartbeat cadence |
 
 Environment:
@@ -185,7 +180,7 @@ recoverable across crashes.
 - Everything runs as the current user; no root or admin elevation.
 - The Supervisor listens only on a local Unix socket (named pipe on Windows);
   requests carry a per-install bearer token stored with mode 0600.
-- The Web API is loopback-only and never hands the browser the token.
+- The Web API is loopback-only and never hands the browser the token; rejected requests receive HTTP 403 with `{ ok: false, error: "forbidden: loopback-only" }`.
 - The launcher and Supervisor never run a shell; DSH argv is relayed verbatim.
 - No secrets are written to state, logs or incident records; snapshots redact
   credentials and the redacted tier can never restore them.
@@ -217,3 +212,7 @@ recoverable across crashes.
 - Windows support is best-effort for junctions, PowerShell 5.1 Unicode and
   per-user scheduled-task registration; several internals assume POSIX file
   semantics.
+
+## Telemetry
+
+The browser half sends one anonymous install heartbeat per UTC day to dsh-market.com: a random localStorage id plus this package's name, nothing else. The server stores only a salted hash of that id, never IP addresses, and exposes aggregate counts only. See [docs/telemetry.md](../../docs/telemetry.md) for the full contract.

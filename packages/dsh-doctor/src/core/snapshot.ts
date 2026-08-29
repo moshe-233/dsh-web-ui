@@ -7,9 +7,9 @@
  * FsLike so tests run against the in-memory tree and partial-write failures
  * are observable.
  */
-import { join } from 'node:path'
+import { join } from 'node:path/posix'
 import { sha256Hex, sha256Short } from './hash.ts'
-import type { FsLike, StatInfo } from './fs.ts'
+import type { FsLike } from './fs.ts'
 import { safeRelativePath } from './paths.ts'
 import type { RedactionResult, SnapshotDump, SnapshotFileEntry, SnapshotManifest } from './types.ts'
 
@@ -71,10 +71,18 @@ export async function captureSnapshot(deps: SnapshotDeps): Promise<SnapshotManif
   const entries: SnapshotFileEntry[] = []
   for (const file of files) {
     const safeRel = safeRelativePath(file.rel)
+    // Stat first so over-limit files are recorded without a full read or hash;
+    // peak memory for large profiles stays bounded by the largest stored file.
+    const stat = await deps.fs.stat(file.path)
+    if (stat.kind === 'file' && stat.size > maxBytes) {
+      entries.push({ path: safeRel, size: stat.size, omitted: true })
+      continue
+    }
     const data = await deps.fs.readBytes(file.path)
     const bytes = data.byteLength
     const binary = isBinary(data)
     if (bytes > maxBytes) {
+      // The file grew after stat; still record it as omitted rather than store it.
       entries.push({ path: safeRel, hash: sha256Hex(data), size: bytes, kind: binary ? 'binary' : 'text', omitted: true })
       continue
     }
@@ -153,7 +161,7 @@ export async function verifySnapshot(fs: FsLike, snapshotDir: string): Promise<S
     try {
       const data = await fs.readBytes(stored)
       const actual = sha256Hex(data)
-      if (actual !== entry.hash) mismatches.push({ path: entry.path, expected: entry.hash, actual })
+      if (actual !== entry.hash) mismatches.push({ path: entry.path, expected: entry.hash ?? '', actual })
     } catch (error) {
       missing.push(entry.path)
     }

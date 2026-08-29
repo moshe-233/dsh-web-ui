@@ -23,7 +23,7 @@ function idsOf(relPath) {
     .map((line) => line.trim().replace(/^- id: /, ''))
 }
 
-const AGGREGATES = ['packages/dsh-web-ui-all/cordis.patch.yml', 'packages/dsh-skins/cordis.patch.yml']
+const AGGREGATES = ['packages/dsh-web-all/cordis.patch.yml']
 
 test('aggregate rows are web-ui-* namespaced and unique', () => {
   for (const rel of AGGREGATES) {
@@ -50,7 +50,7 @@ test('aggregate ids never collide with standalone package ids', () => {
         continue
       }
       const normPatch = patch.replaceAll('\\', '/')
-      if (normPatch === 'packages/dsh-web-ui-all/cordis.patch.yml' || normPatch === 'packages/dsh-skins/cordis.patch.yml') continue
+      if (normPatch === 'packages/dsh-web-all/cordis.patch.yml') continue
       standalonePatches.push(patch)
     }
   }
@@ -92,7 +92,7 @@ test('no aggregate deps entry resolves to a private workspace package', () => {
 })
 
 test('web-ui-all mounts dsh-better-sidebar as an external row', () => {
-  const patch = readFileSync(join(ROOT, 'packages/dsh-web-ui-all/cordis.patch.yml'), 'utf8')
+  const patch = readFileSync(join(ROOT, 'packages/dsh-web-all/cordis.patch.yml'), 'utf8')
   const lines = patch.split(/\r?\n/)
   const idx = lines.findIndex((line) => /^ {4}- id: web-ui-better-sidebar$/.test(line))
   assert.ok(idx >= 0, 'web-ui-better-sidebar row is missing from the aggregate patch')
@@ -101,10 +101,32 @@ test('web-ui-all mounts dsh-better-sidebar as an external row', () => {
 })
 
 test('web-ui-all mounts @mlgbnb/dsh-archive-manager as an external row', () => {
-  const patch = readFileSync(join(ROOT, 'packages/dsh-web-ui-all/cordis.patch.yml'), 'utf8')
+  const patch = readFileSync(join(ROOT, 'packages/dsh-web-all/cordis.patch.yml'), 'utf8')
   const lines = patch.split(/\r?\n/)
   const idx = lines.findIndex((line) => /^ {4}- id: web-ui-archive-manager$/.test(line))
   assert.ok(idx >= 0, 'web-ui-archive-manager row is missing from the aggregate patch')
   // The paired name line resolves the scoped npm package from the profile root.
   assert.match(lines[idx + 1] ?? '', /^ {6}name: '@mlgbnb\/dsh-archive-manager'$/)
+})
+
+test('web-ui-all expands @morlay/better-session into importable but inactive bundle rows', () => {
+  const patch = readFileSync(join(ROOT, 'packages/dsh-web-all/cordis.patch.yml'), 'utf8')
+  const lines = patch.split(/\r?\n/)
+  // The bundle-only external must never appear as an importable row. (Anchor
+  // to the full row: web-ui-better-session-MANAGER, the carrier card package,
+  // legitimately contains the substring.)
+  assert.doesNotMatch(patch, /^ {4}- id: web-ui-better-session$/m, 'bundle-only package must not be emitted as an importable row')
+  // The manifest marks the external inactive: the three namespaced insert rows
+  // ship defined-but-disabled so the stock jsonl persistence stays active
+  // until the user opts in.
+  const hasDisabledOverride = (id) => lines.some((line, i) => line === `- id: ${id}` && lines[i + 1] === '  disabled: true')
+  for (const id of ['web-ui-session-branch', 'web-ui-session-rdb', 'web-ui-conversation-message-actions']) {
+    assert.ok(hasDisabledOverride(id), `row ${id} must ship with a disabled: true override (inactive by default)`)
+  }
+  // The bundle's own harness patch rows must NOT appear at all: they retune
+  // other entries, and emitting them behind another same-id row would merge
+  // into that target instead of staying inert.
+  assert.equal(lines.filter((line) => line === '- id: session-persistence-jsonl').length, 1, 'exactly the dsh-perf tuning row may touch session-persistence-jsonl')
+  assert.equal(patch.match(/# from external bundle @morlay\/better-session \(patch row/g)?.length ?? 0, 0, 'inactive external contributes no harness patches')
+  assert.match(patch, /# inactive by default: the rows above ship disabled/, 'inactive rationale comment is missing')
 })

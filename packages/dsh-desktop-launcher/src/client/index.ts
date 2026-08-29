@@ -1,14 +1,16 @@
-import type { ClientContext, SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-ui-settings/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: pulls the settings-surface SlotMap merge (the definitions that
 // name the 'settings.*' holes) and the ctx.settingsScope Context merge.
-import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+// Type-only: pulls the ctx.slots merge (the renderer owns the slot registry since 0.1.2).
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { DesktopLauncherSettingsCard, DesktopLauncherSettingsCardController, type DesktopLauncherSettings } from './DesktopLauncherSettingsCard.tsx'
 import { en, zh, type DesktopLauncherKey } from './locales.ts'
 import { mountShutdownButton } from './floating-mount.tsx'
-import { startLauncherLifecycle } from './lifecycle.ts'
+import { reportDailyHeartbeat } from './telemetry.ts'
 
 export { DesktopLauncherSettingsCard, DesktopLauncherSettingsCardController } from './DesktopLauncherSettingsCard.tsx'
 export type { DesktopLauncherSettings, DesktopLauncherSettingsCardFace, DesktopLauncherSettingsCardState } from './DesktopLauncherSettingsCard.tsx'
@@ -39,7 +41,7 @@ export interface SettingsPluginItemOwnerProps {
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /**
-     * Optional rc.6 compatibility binder provided by dsh-web-ui-settings;
+     * Optional rc.6 compatibility binder provided by dsh-web-settings;
      * absent when that group plugin is not installed, so callers fall back to
      * the official settings scope.
      */
@@ -64,8 +66,17 @@ export const inject = ['slots', 'locale', 'connection', 'settingsScope', 'remote
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
-  ctx.effect(startLauncherLifecycle, 'desktop-launcher: managed browser lifecycle')
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'desktop-launcher: dictionaries')
+  // Anonymous install heartbeat (docs/telemetry.md): one beat per browser per
+  // UTC day, package name only, silent failure.
+  reportDailyHeartbeat([{ name: '@linxin666/dsh-desktop-launcher' }])
+
+  ctx.effect(() => {
+    try {
+      return ctx.locale.register(NS, { zh, en })
+    } catch {
+      return () => {}
+    }
+  }, 'desktop-launcher: dictionaries')
 
   const binder = ctx.get('webUiSettings') ?? ctx.settingsScope
   const settingsScope = binder.bind<DesktopLauncherSettings>({ namespace: DESKTOP_LAUNCHER_NS })
@@ -104,11 +115,17 @@ export function apply(ctx: ClientContext): void {
   // Plugin configuration card: one staged form over the `desktop-launcher`
   // settings namespace, contributed to the Web UI plugin group.
   const controller = new DesktopLauncherSettingsCardController(settingsScope)
-  ctx.slots.inject('web-ui.plugin.item', () => ctx.slots.register({
-    name: 'web-ui.plugin.item',
-    id: 'desktop-launcher',
-    order: 130,
-    locale: NS,
-    inject: () => controller.inject(),
-  }, DesktopLauncherSettingsCard))
+  ctx.slots.inject('web-ui.plugin.item', () => {
+    try {
+      return ctx.slots.register({
+        name: 'web-ui.plugin.item',
+        id: 'desktop-launcher',
+        order: 130,
+        locale: NS,
+        inject: () => controller.inject(),
+      }, DesktopLauncherSettingsCard)
+    } catch {
+      return () => {}
+    }
+  })
 }

@@ -1,6 +1,6 @@
 # ISSUE_TRIAGE — Issue 分类标准与处理流程
 
-本文件定义 dsh-web-ui 仓库的 Issue 标签体系、分类标准与处理流程，供维护者
+本文件定义 dsh-web 仓库的 Issue 标签体系、分类标准与处理流程，供维护者
 与贡献者共同使用。目标是让每个 Open Issue 可检索、可认领、可追溯。
 
 ## 标签体系
@@ -28,7 +28,7 @@
    重复，打 `duplicate` 并关闭，评论附上原 Issue 链接。
 2. **定类型**：按标题前缀与正文模板判断 `bug` / `enhancement` /
    `documentation` / `question`，打对应标签。
-3. **补信息**：Bug 报告正文缺复现步骤、环境信息、截图、冒烟测试、代码引用或补丁时，评论请作者补充，并保留
+3. **补信息**：Bug 报告正文缺复现步骤、环境信息、截图、冒烟测试或代码引用时，评论请作者补充，并保留
    `question` 或 `bug` 标签等待回复。
 4. **新手任务**：范围小、验收明确的任务追加 `good first issue`；涉及深层
    插件架构或需要修改 DSH 核心的不标。
@@ -54,35 +54,42 @@
 
 ```sh
 # 打标签（多个逗号分隔）
-gh issue edit <n> -R zhu1090093659/dsh-web-ui --add-label "bug,good first issue"
+gh issue edit <n> -R zhu1090093659/dsh-web --add-label "bug,good first issue"
 
 # 关闭并说明（completed / not_planned）
-gh api -X PATCH repos/zhu1090093659/dsh-web-ui/issues/<n> \
+gh api -X PATCH repos/zhu1090093659/dsh-web/issues/<n> \
   -f state=closed -f state_reason=completed
-gh issue comment <n> -R zhu1090093659/dsh-web-ui --body "说明"
+gh issue comment <n> -R zhu1090093659/dsh-web --body "说明"
 
 # 列出待分类的 Open Issue
-gh issue list -R zhu1090093659/dsh-web-ui --state open \
+gh issue list -R zhu1090093659/dsh-web --state open \
   --json number,title,labels --jq '.[] | select(.labels|length==0)'
 ```
 
 ## 自动化
 
-自动化工作流在 Issue 创建时自动初筛并可直接关闭，无需人工确认；作者可
+自动化工作流在 Issue 创建时自动初筛、分配并可直接关闭，无需人工确认；作者可
 通过评论请求重开，由维护者评估：
 
+- `.github/workflows/auto-assign-issues.yml`：新建 Issue 触发，排除 pull request 载荷，并将每个 Issue 的负责人统一替换为协作者
+  `Aa728848`；它不读取 PR 分类路由，也没有所有者兜底；
+- `.github/workflows/stale-assignment.yml`：每天检查开放项目，但只处理带 `pull_request` 载荷的 PR；分配给协作者且超过 14 天没有其评论或
+  审查活动的 PR 自动转给仓库所有者，Issue 不参与该升级；
 - `.github/workflows/issue-dedup.yml`：对疑似重复的 Issue 自动打 `duplicate`
   标签，评论附原 Issue 链接并关闭（`not_planned`）；作者可回复说明差异请求
   重开；
-- `.github/workflows/issue-template-enforcer.yml`：Bug 报告必填段（含截图、冒烟测试、引用代码与补丁）缺失或无效、或未带 `bug` 标签时
+- `.github/workflows/issue-template-enforcer.yml`：Bug 报告必填段（含截图、冒烟测试、引用代码）缺失或无效、或未带 `bug` 标签时
   自动评论说明并关闭（`not_planned`），补充完整后可请求重开；
 - 自动化只做初筛，人工标签补充与「重开 / 不重开」的最终决定由维护者确认。
 
 ## 贡献者指引
 
 - 提 Issue 前先检索标签与关键词，确认没有重复；
+- 改动不在三类内容贡献范围内（插件申请 / 皮肤增加 / 宠物增加，见
+  [CONTRIBUTING.md](CONTRIBUTING.md) 的「PR 范围」）时不要直接开 PR，请以
+  Issue 提交讨论；
 - 用 [Issue 模板](.github/ISSUE_TEMPLATE/standard_issue.yml) 提交；Bug 报告用
-  「Bug 报告」表单提交，自动附加 `bug` 标签，并包含复现步骤、环境信息、截图、冒烟测试、引用代码与建议补丁；
+  「Bug 报告」表单提交，自动附加 `bug` 标签，并包含复现步骤、环境信息、截图、冒烟测试、引用代码；
 - 想认领任务，优先挑选 `good first issue` 或 `help wanted`，在评论区留言；
 - 已关闭的 Issue 若问题仍然存在，请重开并补充最新信息，不要开新 Issue
   重复描述。

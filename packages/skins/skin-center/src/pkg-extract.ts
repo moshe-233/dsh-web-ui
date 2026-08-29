@@ -1225,22 +1225,6 @@ function isLikelyMaskOrHelper(path: string): boolean {
   )
 }
 
-function isNaturalImageRgba(rgba: Uint8Array, width: number, height: number): boolean {
-  const totalPixels = width * height
-  const step = Math.max(1, Math.floor(totalPixels / 2000))
-  let opaqueCount = 0
-  let sampleCount = 0
-  for (let i = 0; i < totalPixels; i += step) {
-    sampleCount++
-    const idx = i * 4
-    const a = rgba[idx + 3]
-    if (a >= 240) {
-      opaqueCount++
-    }
-  }
-  return sampleCount > 0 && (opaqueCount / sampleCount) >= 0.85
-}
-
 function hasContent(rgba: Uint8Array, width: number, height: number): boolean {
   const totalPixels = width * height
   const step = Math.max(1, Math.floor(totalPixels / 1000))
@@ -1610,25 +1594,25 @@ export function extractSceneMainImageFromDir(dir: string): SceneMainImage {
   return extractSceneMainImageVia(dirSceneAccess(dir), 'scene')
 }
 
+/** Return an MP4 payload embedded in a TEX mipmap/file, if present. */
+function embeddedMp4Bytes(raw: Uint8Array): Uint8Array | null {
+  for (let i = 0; i < 200 && i + 8 <= raw.length; i++) {
+    if (raw[i] !== 0x66 || raw[i + 1] !== 0x74 || raw[i + 2] !== 0x79 || raw[i + 3] !== 0x70) continue
+    const ftypOffset = i - 4
+    if (ftypOffset >= 0 && ftypOffset < raw.length) return raw.slice(ftypOffset)
+  }
+  return null
+}
+
 /** Find and extract the primary MP4 video embedded inside a scene's .tex textures. */
 function extractSceneVideoVia(access: SceneAccess): Uint8Array | null {
   const candidates: { path: string; score: number; bytes: Uint8Array }[] = []
   for (const path of access.listTexPaths()) {
     const file = access.readFile(path)
     if (!file) continue
-    const raw = file.bytes
-    for (let i = 0; i < 200 && i + 8 <= raw.length; i++) {
-      if (raw[i] === 0x66 && raw[i + 1] === 0x74 && raw[i + 2] === 0x79 && raw[i + 3] === 0x70) {
-        const ftypOffset = i - 4
-        if (ftypOffset >= 0 && ftypOffset < raw.length) {
-          candidates.push({
-            path,
-            score: getTextureScore(path),
-            bytes: raw.slice(ftypOffset),
-          })
-          break
-        }
-      }
+    const bytes = embeddedMp4Bytes(file.bytes)
+    if (bytes !== null) {
+      candidates.push({ path, score: getTextureScore(path), bytes })
     }
   }
   if (candidates.length === 0) return null
@@ -1688,6 +1672,10 @@ export interface SceneManifestLayer {
   waterLine?: number
   sway?: number
   swaySpeed?: number
+  /** Real-time period selected by an embedded WE time controller. */
+  timePeriod?: 'morning' | 'day' | 'dusk' | 'night' | 'manual'
+  /** An embedded MP4 texture served directly to the scene player. */
+  videoUrl?: string
 }
 
 export interface DecodedMesh {
@@ -1696,6 +1684,8 @@ export interface DecodedMesh {
   pos: Float32Array
   norm: Float32Array
   uv: Float32Array
+  /** Optional second UV channel used by baked lightmaps. */
+  uv2?: Float32Array
   /** u16 for meshes with <= 65535 vertices, u32 above that (mdlv >= 23). */
   indices: Uint16Array | Uint32Array
   materialPath?: string
@@ -1707,10 +1697,14 @@ export interface SceneManifestMesh {
   posB64: string
   normB64: string
   uvB64: string
+  /** Optional second UV channel used by baked lightmaps. */
+  uv2B64?: string
   indicesB64: string
   /** True when indicesB64 decodes to Uint32Array (mesh has > 65535 vertices). */
   idx32?: boolean
   texUrl?: string
+  /** Repeat the base texture when authored UVs leave the [0,1] range. */
+  repeatBase?: boolean
   materialPath?: string
   /** WE material shader name (passes[0].shader), e.g. 'ricepodjet'. */
   shader?: string
@@ -1724,8 +1718,10 @@ export interface SceneManifestMesh {
   tint?: [number, number, number]
   /** Second tint (usershadervalues entry mapped to the 'tint2' uniform). */
   tint2?: [number, number, number]
-  /** Second texture of the material pass (e.g. bg pattern overlay). */
+  /** Second texture of the material pass (e.g. normal map or bg overlay). */
   texUrl2?: string
+  /** Baked lightmap texture selected from the material combo texture slots. */
+  lightmapUrl?: string
   /** WE material blending 'translucent' (alpha-blended overlay). */
   translucent?: boolean
   /** GRADIENT_FADE combo: alpha fades towards the top/bottom edges. */
@@ -1781,6 +1777,12 @@ export interface SceneManifestModel {
   meshes: SceneManifestMesh[]
 }
 
+export interface SceneManifestPointLight {
+  origin: [number, number, number]
+  color: [number, number, number]
+  radius: number
+}
+
 export interface SceneManifestCamera {
   eye: [number, number, number]
   center: [number, number, number]
@@ -1796,6 +1798,9 @@ export interface SceneManifest {
   carBodyColor?: [number, number, number]
   carStripesColor?: [number, number, number]
   camera?: SceneManifestCamera
+  ambientColor?: [number, number, number]
+  skyLightColor?: [number, number, number]
+  pointLights?: SceneManifestPointLight[]
   /** Scene declares a camera but no animation paths: fixed viewpoint. */
   cameraStatic?: boolean
   cameraPaths?: Array<{
@@ -1817,162 +1822,9 @@ export interface SceneManifest {
   sparkleTex?: string
   /** Scene contains WE embedded scripts the browser renderer cannot execute. */
   scripted?: boolean
+  /** Author-configured local-hour boundaries for real-time scene switching. */
+  timeSchedule?: { morning: number; day: number; dusk: number; night: number }
   layers: SceneManifestLayer[]
-}
-
-/** Decompress LZ4 block format (no frame header, raw block). */
-function decompressLz4Block(src: Uint8Array, decompressedSize: number): Uint8Array {
-  if (decompressedSize < 0 || decompressedSize > MAX_DECOMPRESSED_BYTES) {
-    throw new Error('lz4: decompressed size out of bounds (' + String(decompressedSize) + ')')
-  }
-  const dst = new Uint8Array(decompressedSize)
-  let sp = 0, dp = 0
-  while (sp < src.length && dp < decompressedSize) {
-    const token = src[sp++]
-    let litLen = token >> 4
-    if (litLen === 15) { let b; do { b = src[sp++]; litLen += b } while (b === 255) }
-    for (let i = 0; i < litLen; i++) dst[dp++] = src[sp++]
-    if (sp >= src.length || dp >= decompressedSize) break
-    const offset = src[sp] | (src[sp + 1] << 8); sp += 2
-    let matchLen = (token & 0xf) + 4
-    if (matchLen === 19) { let b; do { b = src[sp++]; matchLen += b } while (b === 255) }
-    const matchStart = dp - offset
-    for (let i = 0; i < matchLen; i++) dst[dp++] = dst[matchStart + i]
-  }
-  return dst
-}
-
-/** Decode DXT1 (BC1) 4x4 block into RGBA pixels. */
-function decodeDXT1Block(block: Uint8Array, offset: number, out: Uint8Array, outOffset: number, outStride: number): void {
-  const c0 = block[offset] | (block[offset + 1] << 8)
-  const c1 = block[offset + 2] | (block[offset + 3] << 8)
-  const r0 = ((c0 >> 11) & 0x1f) * 255 / 31, g0 = ((c0 >> 5) & 0x3f) * 255 / 63, b0 = (c0 & 0x1f) * 255 / 31
-  const r1 = ((c1 >> 11) & 0x1f) * 255 / 31, g1 = ((c1 >> 5) & 0x3f) * 255 / 63, b1 = (c1 & 0x1f) * 255 / 31
-  const colors = [
-    [r0, g0, b0, 255], [r1, g1, b1, 255],
-    c0 > c1 ? [(2 * r0 + r1) / 3, (2 * g0 + g1) / 3, (2 * b0 + b1) / 3, 255] : [(r0 + r1) / 2, (g0 + g1) / 2, (b0 + b1) / 2, 255],
-    c0 > c1 ? [(r0 + 2 * r1) / 3, (g0 + 2 * g1) / 3, (b0 + 2 * b1) / 3, 255] : [0, 0, 0, 0],
-  ]
-  const bits = block[offset + 4] | (block[offset + 5] << 8) | (block[offset + 6] << 16) | (block[offset + 7] << 24)
-  for (let y = 0; y < 4; y++) {
-    for (let x = 0; x < 4; x++) {
-      const idx = (bits >> ((y * 4 + x) * 2)) & 3
-      const p = outOffset + y * outStride + x * 4
-      out[p] = colors[idx][0]; out[p + 1] = colors[idx][1]; out[p + 2] = colors[idx][2]; out[p + 3] = colors[idx][3]
-    }
-  }
-}
-
-/** Decode DXT5 (BC3) 4x4 block into RGBA pixels. */
-function decodeDXT5Block(block: Uint8Array, offset: number, out: Uint8Array, outOffset: number, outStride: number): void {
-  // Alpha block: 2 reference alphas + 6 bytes of 3-bit indices
-  const a0 = block[offset], a1 = block[offset + 1]
-  const alphaLUT = [a0, a1, 0, 0, 0, 0, 0, 0]
-  if (a0 > a1) {
-    for (let i = 1; i <= 6; i++) alphaLUT[i + 1] = ((7 - i) * a0 + i * a1) / 7
-  } else {
-    for (let i = 1; i <= 4; i++) alphaLUT[i + 1] = ((5 - i) * a0 + i * a1) / 5
-    alphaLUT[6] = 0; alphaLUT[7] = 255
-  }
-  // 48-bit alpha index block (6 bytes, 16 x 3-bit indices)
-  let alphaBits = 0n
-  for (let i = 0; i < 6; i++) alphaBits |= BigInt(block[offset + 2 + i]) << BigInt(i * 8)
-
-  // Color block at offset+8
-  decodeDXT1Block(block, offset + 8, out, outOffset, outStride)
-  // Override alpha with DXT5 alpha
-  for (let y = 0; y < 4; y++) {
-    for (let x = 0; x < 4; x++) {
-      const ai = Number((alphaBits >> BigInt((y * 4 + x) * 3)) & 7n)
-      out[outOffset + y * outStride + x * 4 + 3] = alphaLUT[ai]
-    }
-  }
-}
-
-/**
- * Parse Wallpaper Engine TEXV0005 .tex file and return raw RGBA pixel data.
- * Returns null if format is unsupported.
- */
-export function parseTexToRGBA(buf: Uint8Array): { width: number; height: number; rgba: Uint8Array } | null {
-  if (buf.length < 55) return null
-  const magic = String.fromCharCode(...buf.slice(0, 8))
-  if (magic !== 'TEXV0005') return null
-  const texi = String.fromCharCode(...buf.slice(9, 17))
-  if (texi !== 'TEXI0001') return null
-
-  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
-  const fmt = dv.getUint32(18, true) // 0=ARGB8888, 4=DXT5, 6=DXT3, 7=DXT1
-  const texW = dv.getUint32(26, true)
-  const texH = dv.getUint32(30, true)
-
-  // Find TEXB section
-  let texbPos = -1
-  for (let i = 34; i < Math.min(buf.length, 100); i++) {
-    if (buf[i] === 0x54 && buf[i + 1] === 0x45 && buf[i + 2] === 0x58 && buf[i + 3] === 0x42) {
-      texbPos = i
-      break
-    }
-  }
-  if (texbPos < 0) return null
-
-  let p = texbPos + 9 // skip TEXB0003\0
-  const _containerFlag = dv.getUint32(p, true); p += 4
-  const _fmtRewrite = dv.getInt32(p, true); p += 4
-  const numMips = dv.getUint32(p, true); p += 4
-  if (numMips === 0 || numMips > 20) return null
-
-  // Read the first (largest) mip level
-  const mipW = dv.getUint32(p, true); p += 4
-  const mipH = dv.getUint32(p, true); p += 4
-  if (mipW <= 0 || mipH <= 0 || mipW > MAX_TEX_DIMENSION || mipH > MAX_TEX_DIMENSION || mipW * mipH > MAX_TEX_PIXELS) {
-    throw new Error('tex: invalid mipmap dimensions ' + mipW + 'x' + mipH)
-  }
-  const isLz4 = dv.getUint32(p, true); p += 4
-  const decompSize = dv.getUint32(p, true); p += 4
-  const compSize = dv.getUint32(p, true); p += 4
-
-  let texData: Uint8Array
-  if (isLz4) {
-    texData = decompressLz4Block(buf.slice(p, p + compSize), decompSize)
-  } else {
-    texData = buf.slice(p, p + compSize)
-  }
-
-  // Decompress based on format
-  const rgba = new Uint8Array(mipW * mipH * 4)
-  const stride = mipW * 4
-
-  if (fmt === 4) {
-    // DXT5 (BC3): 16 bytes per 4x4 block
-    const blocksX = mipW / 4, blocksY = mipH / 4
-    for (let by = 0; by < blocksY; by++) {
-      for (let bx = 0; bx < blocksX; bx++) {
-        const blockIdx = (by * blocksX + bx) * 16
-        decodeDXT5Block(texData, blockIdx, rgba, (by * 4) * stride + bx * 4 * 4, stride)
-      }
-    }
-  } else if (fmt === 7) {
-    // DXT1 (BC1): 8 bytes per 4x4 block
-    const blocksX = mipW / 4, blocksY = mipH / 4
-    for (let by = 0; by < blocksY; by++) {
-      for (let bx = 0; bx < blocksX; bx++) {
-        const blockIdx = (by * blocksX + bx) * 8
-        decodeDXT1Block(texData, blockIdx, rgba, (by * 4) * stride + bx * 4 * 4, stride)
-      }
-    }
-  } else if (fmt === 0) {
-    // ARGB8888 -> RGBA8888
-    for (let i = 0; i < mipW * mipH; i++) {
-      rgba[i * 4] = texData[i * 4 + 1]     // R
-      rgba[i * 4 + 1] = texData[i * 4 + 2] // G
-      rgba[i * 4 + 2] = texData[i * 4 + 3] // B
-      rgba[i * 4 + 3] = texData[i * 4]      // A
-    }
-  } else {
-    return null // Unsupported format
-  }
-
-  return { width: mipW, height: mipH, rgba }
 }
 
 // Vertex layout bits of the MDLV mesh flag (matches the open-source
@@ -2062,6 +1914,7 @@ export function parseMdl(buf: Uint8Array): DecodedMesh[] {
     const pos = new Float32Array(vCount * 3)
     const norm = new Float32Array(vCount * 3)
     const uv = new Float32Array(vCount * 2)
+    const uv2 = (meshFlag & MDL_FLAG_UV2) !== 0 ? new Float32Array(vCount * 2) : undefined
     const hasNorm = (meshFlag & MDL_FLAG_NORMAL) !== 0
     const hasUv = (meshFlag & (MDL_FLAG_UV | MDL_FLAG_UV2)) !== 0
     for (let v = 0; v < vCount; v++) {
@@ -2088,7 +1941,11 @@ export function parseMdl(buf: Uint8Array): DecodedMesh[] {
         uv[v * 2 + 1] = dv.getFloat32(p + 4, true)
         p += 8
       }
-      if (meshFlag & MDL_FLAG_UV2) p += 8
+      if (uv2) {
+        uv2[v * 2] = dv.getFloat32(p, true)
+        uv2[v * 2 + 1] = dv.getFloat32(p + 4, true)
+        p += 8
+      }
     }
 
     if (p + 4 > buf.length) return meshes
@@ -2109,7 +1966,7 @@ export function parseMdl(buf: Uint8Array): DecodedMesh[] {
     }
     p += iBytes
 
-    meshes.push({ vCount, iCount, pos, norm, uv, indices, materialPath: materials[0] })
+    meshes.push({ vCount, iCount, pos, norm, uv, uv2, indices, materialPath: materials[0] })
   }
   return meshes
 }
@@ -2125,15 +1982,21 @@ function containsEmbeddedScript(value: unknown, seen = new Set<object>()): boole
   return Object.values(value).some(child => containsEmbeddedScript(child, seen))
 }
 
-function buildSceneManifestVia(access: SceneAccess, token: string): SceneManifest | null {
+function buildSceneManifestVia(access: SceneAccess, token: string, projectOverride?: unknown): SceneManifest | null {
   let scene = access.readJson('scene.json') as Record<string, unknown> | null
-  const project = access.readJson('project.json') as Record<string, unknown> | null
+  const project = (projectOverride && typeof projectOverride === 'object' ? projectOverride : access.readJson('project.json')) as Record<string, unknown> | null
   if (!scene && project && typeof project.file === 'string' && project.file.endsWith('.json')) {
     scene = access.readJson(project.file) as Record<string, unknown> | null
   }
   if (!scene || !Array.isArray(scene.objects)) return null
 
-  const general = scene.general as { orthogonalprojection?: { width?: number; height?: number } } | undefined
+  const general = scene.general as {
+    ambientcolor?: unknown
+    clearcolor?: unknown
+    fov?: unknown
+    skylightcolor?: unknown
+    orthogonalprojection?: { width?: number; height?: number }
+  } | undefined
   const projW = general?.orthogonalprojection?.width
   const projH = general?.orthogonalprojection?.height
   // Negative / NaN / non-numeric projection values must not leak into the
@@ -2160,7 +2023,42 @@ function buildSceneManifestVia(access: SceneAccess, token: string): SceneManifes
     return def
   }
 
+  manifest.clearColor = parseVec3(general?.clearcolor, [0.1, 0.1, 0.15])
+  manifest.ambientColor = parseVec3(general?.ambientcolor, [0, 0, 0])
+  manifest.skyLightColor = parseVec3(general?.skylightcolor, [0, 0, 0])
+  const pointLights = (scene.objects as Array<Record<string, unknown>>)
+    .filter((obj) => obj.light === 'point')
+    .slice(0, 4)
+    .map((obj) => {
+      const intensity = typeof obj.intensity === 'number' && Number.isFinite(obj.intensity)
+        ? Math.max(0, obj.intensity)
+        : 1
+      const color = parseVec3(obj.color, [1, 1, 1])
+      return {
+        origin: parseVec3(obj.origin, [0, 0, 0]),
+        color: color.map((channel) => channel * intensity) as [number, number, number],
+        radius: typeof obj.radius === 'number' && Number.isFinite(obj.radius) && obj.radius > 0 ? obj.radius : 1,
+      }
+    })
+  if (pointLights.length > 0) manifest.pointLights = pointLights
+
   const props = (project?.general as Record<string, unknown> | undefined)?.properties as Record<string, Record<string, unknown>> | undefined
+  const propertyValue = (name: string): unknown => props?.[name]?.value
+  const boundedHour = (name: string, fallback: number): number => {
+    const raw = propertyValue(name)
+    const numeric = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN
+    return Number.isFinite(numeric) && numeric >= 0 && numeric < 24 ? numeric : fallback
+  }
+  const timeVarying = propertyValue('timevarying') === true
+  const timePeriods = new Set(['morning', 'day', 'dusk', 'night', 'mddn'])
+  if (timeVarying && (scene.objects as Array<Record<string, unknown>>).some((obj) => timePeriods.has(String(obj.name).toLowerCase()))) {
+    manifest.timeSchedule = {
+      morning: boundedHour('morningtime', 4),
+      day: boundedHour('daytime', 8),
+      dusk: boundedHour('dusktime', 17),
+      night: boundedHour('nighttime', 20),
+    }
+  }
   if (props?.schemecolor?.value && typeof props.schemecolor.value === 'string') {
     manifest.clearColor = parseVec3(props.schemecolor.value, [0.57, 0.71, 0.81])
   }
@@ -2207,11 +2105,19 @@ function buildSceneManifestVia(access: SceneAccess, token: string): SceneManifes
         if (manifest.cameraPaths.length === 0) delete manifest.cameraPaths
       }
     }
+    const cameraFov = cam?.fov
+    const generalFov = general?.fov
+    const validFov = (value: unknown): value is number =>
+      typeof value === 'number' && Number.isFinite(value) && value > 0 && value < 180
     manifest.camera = {
       eye,
       center,
       up,
-      fov: typeof cam?.fov === 'number' ? cam.fov : 45,
+      // Wallpaper Engine serializes the projection FOV under scene.general;
+      // a few older projects put it on the camera itself. Prefer the explicit
+      // camera value, then the authored general value, then WE's 50-degree
+      // default. Falling back to 45 over-zooms official scenes such as Arsenal.
+      fov: validFov(cameraFov) ? cameraFov : validFov(generalFov) ? generalFov : 50,
     }
     // A scene camera without usable paths is a fixed viewpoint, not an orbit.
     if (cam && !(manifest.cameraPaths && manifest.cameraPaths.length > 0)) {
@@ -2225,11 +2131,7 @@ function buildSceneManifestVia(access: SceneAccess, token: string): SceneManifes
       const decodedMeshes = parseMdl(mdlFile.bytes)
       if (decodedMeshes.length === 0) continue
 
-      let texPath: string | undefined
       const baseName = obj.model.split('/').pop()?.replace(/\.mdl$/i, '')
-      if (baseName) {
-        texPath = allTex.find((p) => p.toLowerCase().includes(baseName.toLowerCase()) && !p.toLowerCase().includes('normal') && !p.toLowerCase().includes('mask'))
-      }
 
       // Resolve a WE material texture reference ('ricepod/jet') to a tex path.
       const resolveTexRef = (ref: string): string | undefined => {
@@ -2249,6 +2151,7 @@ function buildSceneManifestVia(access: SceneAccess, token: string): SceneManifes
         let tint: [number, number, number] | undefined
         let tint2: [number, number, number] | undefined
         let texPath2: string | undefined
+        let lightmapPath: string | undefined
         let translucent: boolean | undefined
         let gradFade: boolean | undefined
         let userColors: Record<string, [number, number, number]> | undefined
@@ -2272,8 +2175,15 @@ function buildSceneManifestVia(access: SceneAccess, token: string): SceneManifes
               if (dt === 'disabled') noDepthTest = true
               if (dw === 'disabled') noDepthWrite = true
               if (Array.isArray(pass0.textures) && pass0.textures.length > 0) {
-                subTex = resolveTexRef(String(pass0.textures[0]))
-                if (pass0.textures.length > 1) texPath2 = resolveTexRef(String(pass0.textures[1]))
+                const texturePaths = pass0.textures.map((texture) => resolveTexRef(String(texture)))
+                subTex = texturePaths[0]
+                if (texturePaths.length > 1) texPath2 = texturePaths[1]
+                if (combos?.lightmap) {
+                  // generic.frag places the lightmap after the optional normal
+                  // map. Preserve its dedicated role instead of treating it as
+                  // an arbitrary second overlay texture.
+                  lightmapPath = texturePaths[combos?.normalmap ? 2 : 1]
+                }
               }
               // usershadervalues bind WE user properties (schemecolor etc.)
               // to shader uniforms; resolve colors and numbers at build time.
@@ -2328,9 +2238,11 @@ function buildSceneManifestVia(access: SceneAccess, token: string): SceneManifes
           posB64: Buffer.from(m.pos.buffer, m.pos.byteOffset, m.pos.byteLength).toString('base64'),
           normB64: Buffer.from(m.norm.buffer, m.norm.byteOffset, m.norm.byteLength).toString('base64'),
           uvB64: Buffer.from(m.uv.buffer, m.uv.byteOffset, m.uv.byteLength).toString('base64'),
+          uv2B64: m.uv2 ? Buffer.from(m.uv2.buffer, m.uv2.byteOffset, m.uv2.byteLength).toString('base64') : undefined,
           indicesB64: Buffer.from(m.indices.buffer, m.indices.byteOffset, m.indices.byteLength).toString('base64'),
           idx32: m.indices instanceof Uint32Array || undefined,
           texUrl: subTex ? resourceBase + subTex : undefined,
+          repeatBase: m.uv.some((value) => value < 0 || value > 1) || undefined,
           materialPath: m.materialPath,
           shader,
           additive,
@@ -2339,6 +2251,7 @@ function buildSceneManifestVia(access: SceneAccess, token: string): SceneManifes
           tint,
           tint2,
           texUrl2: texPath2 ? resourceBase + texPath2 : undefined,
+          lightmapUrl: lightmapPath ? resourceBase + lightmapPath : undefined,
           translucent,
           gradFade,
           userColors,
@@ -2563,8 +2476,12 @@ function buildSceneManifestVia(access: SceneAccess, token: string): SceneManifes
     }
 
     if (obj.visible === false) continue
-    if (obj.visible && typeof obj.visible === 'object' && (obj.visible as { value?: unknown }).value === false) continue
     const nameLower = (typeof obj.name === 'string' ? obj.name : '').toLowerCase()
+    const isTimePeriodLayer = manifest.timeSchedule !== undefined && timePeriods.has(nameLower)
+    // WE's time controller overrides the stored visibility of all period layers
+    // at runtime. Keep those layers in the manifest even when project.json's
+    // default selection marks them hidden; ordinary hidden layers stay skipped.
+    if (obj.visible && typeof obj.visible === 'object' && (obj.visible as { value?: unknown }).value === false && !isTimePeriodLayer) continue
     if (
       nameLower.includes('black') ||
       nameLower.includes('len') ||
@@ -2698,6 +2615,12 @@ function buildSceneManifestVia(access: SceneAccess, token: string): SceneManifes
     const alpha = typeof obj.alpha === 'number' && Number.isFinite(obj.alpha)
       ? Math.min(1, Math.max(0, obj.alpha))
       : 1
+    let videoUrl: string | undefined
+    try {
+      if (parseTexInternal(file.bytes).isVideoMp4) videoUrl = resourceBase + texPath
+    } catch {
+      // Not a parseable TEX: the existing image/resource fallback decides it.
+    }
 
     // decodeTex already crops power-of-two padding to the TEXI image rect,
     // so only an explicit cropoffset produces a sampled sub-rect here.
@@ -2768,6 +2691,10 @@ function buildSceneManifestVia(access: SceneAccess, token: string): SceneManifes
       isGround,
       sway: 0,
       swaySpeed: 1.5,
+      timePeriod: isTimePeriodLayer
+        ? (nameLower === 'mddn' ? 'manual' : nameLower as 'morning' | 'day' | 'dusk' | 'night')
+        : undefined,
+      videoUrl,
     })
   }
 
@@ -2785,6 +2712,7 @@ function extractSceneResourceVia(access: SceneAccess, subpath: string): Uint8Arr
   try {
     const parsed = parseTexInternal(file.bytes)
     const mip0 = parsed.mipmaps[0]
+    if (parsed.isVideoMp4) return embeddedMp4Bytes(file.bytes) ?? mip0.bytes
     if (isPngBuffer(mip0.bytes)) {
       return Buffer.from(mip0.bytes)
     }
@@ -2795,8 +2723,8 @@ function extractSceneResourceVia(access: SceneAccess, subpath: string): Uint8Arr
   }
 }
 
-export function buildSceneManifest(pkgData: Uint8Array, token: string): SceneManifest | null {
-  return buildSceneManifestVia(pkgSceneAccess(pkgData), token)
+export function buildSceneManifest(pkgData: Uint8Array, token: string, project?: unknown): SceneManifest | null {
+  return buildSceneManifestVia(pkgSceneAccess(pkgData), token, project)
 }
 
 export function buildSceneManifestFromDir(dir: string, token: string): SceneManifest | null {

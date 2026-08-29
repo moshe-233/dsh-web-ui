@@ -153,6 +153,7 @@ function parseSnapshot(value: unknown): Record<string, unknown> | undefined {
     incidents,
     updatedAt: typeof record['updatedAt'] === 'string' ? record['updatedAt'] : undefined,
     degradedReason: typeof record['degradedReason'] === 'string' ? record['degradedReason'] : undefined,
+    policy: (() => { const policy = asRecord(record['policy']); return policy === undefined ? undefined : { fullProtection: typeof policy['fullProtection'] === 'boolean' ? policy['fullProtection'] : undefined, autoRepair: typeof policy['autoRepair'] === 'boolean' ? policy['autoRepair'] : undefined, autoMigrate: typeof policy['autoMigrate'] === 'boolean' ? policy['autoMigrate'] : undefined } })(),
   }
 }
 
@@ -191,7 +192,7 @@ export class DoctorApi {
 
   constructor(deps?: { fetch?: DoctorFetch; base?: string }) {
     this.fetch = deps?.fetch ?? defaultFetch
-    this.base = deps?.base ?? ''
+    this.base = deps?.base ?? DOCTOR_API_BASE
   }
 
   /** GET /api/doctor/status (supervisor snapshot). */

@@ -15,6 +15,7 @@
 import { createEffectLedger } from './effect-ledger.ts'
 import { createSemanticAdapter } from './semantic-adapter.ts'
 import type { SemanticAdapter } from './semantic-adapter.ts'
+import { installShellRenderingAdapter } from './shell-rendering.ts'
 import { createSkinController } from './skin-controller.ts'
 import type { ControllerSkinEntry, SkinController } from './skin-controller.ts'
 
@@ -87,6 +88,7 @@ export function bootSkinRuntime(options: BootOptions = {}): SkinRuntimeStore {
   })
   const adapter = createSemanticAdapter(doc)
   adapter.start()
+  const disposeShellRendering = installShellRenderingAdapter(doc)
 
   let catalog: CatalogSkin[] | null = null
   let diagnostics: CatalogDiagnostic[] = []
@@ -127,6 +129,7 @@ export function bootSkinRuntime(options: BootOptions = {}): SkinRuntimeStore {
     },
     shutdown() {
       adapter.stop()
+      disposeShellRendering()
       controller.shutdown()
     },
   }
@@ -149,9 +152,14 @@ export function bootSkinRuntime(options: BootOptions = {}): SkinRuntimeStore {
         active = payload.ok && typeof payload.active === 'string' ? payload.active : null
       }
       if (active === null) return
-      const entry = store.find(active)
+      let entry = store.find(active)
       if (entry === null) {
-        await controller.switchTo(null, null)
+        const defaultEntry = store.find('blue-fantasy')
+        if (defaultEntry !== null) {
+          await controller.switchTo('blue-fantasy', defaultEntry as ControllerSkinEntry)
+        } else {
+          await controller.switchTo(null, null)
+        }
         return
       }
       await controller.switchTo(active, entry as ControllerSkinEntry)
@@ -161,6 +169,23 @@ export function bootSkinRuntime(options: BootOptions = {}): SkinRuntimeStore {
       await controller.switchTo(null, null).catch(() => {})
     }
   })()
+
+  if (typeof doc.defaultView !== 'undefined' && doc.defaultView !== null) {
+    const win = doc.defaultView
+    const onSkinApplied = (e: Event) => {
+      const detail = (e as CustomEvent<{ id?: string }>).detail
+      if (detail && typeof detail.id === 'string') {
+        void refreshCatalog().then(async () => {
+          const entry = store.find(detail.id!)
+          if (entry !== null) {
+            await controller.switchTo(detail.id!, entry as ControllerSkinEntry)
+          }
+        })
+      }
+    }
+    win.addEventListener('dsh-skin-applied', onSkinApplied)
+    listeners.add(() => win.removeEventListener('dsh-skin-applied', onSkinApplied))
+  }
 
   return store
 }

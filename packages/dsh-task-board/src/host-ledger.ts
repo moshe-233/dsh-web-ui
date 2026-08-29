@@ -5,12 +5,12 @@ import { dirname, join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
 import { isValidCron, nextRunAtMs } from './core/schedule.ts'
 import { parseLedger } from './core/store.ts'
-import { canMoveManually, settleExecution, startExecution, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
+import { canMoveManually, retainRecentExecutions, settleExecution, startExecution, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
 import { applyArchiveTask, applyRestoreTask } from './core/use-cases/task-archive.ts'
 import { applyCreateTask } from './core/use-cases/task-create.ts'
 import { applyDeleteTask } from './core/use-cases/task-delete.ts'
 import { applySetSchedule, applyScheduleNextRun } from './core/use-cases/task-schedule.ts'
-import { applyUpdateTask } from './core/use-cases/task-update.ts'
+import { applyUpdateTask, canEditTaskContent, hasContentPatch } from './core/use-cases/task-update.ts'
 import { TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts'
 
 interface PersistedScheduler extends TaskBoardSchedulerSnapshot {
@@ -232,7 +232,8 @@ function mergeTask(a: TaskRecord, b: TaskRecord): TaskRecord {
     const previous = byId.get(entry.id)
     byId.set(entry.id, previous === undefined ? entry : betterExecution(previous, entry))
   }
-  return { ...newer, executions: [...byId.values()].sort((x, y) => x.startedAt - y.startedAt) }
+  const executions = [...byId.values()].sort((x, y) => x.startedAt - y.startedAt)
+  return { ...newer, executions: retainRecentExecutions(executions) }
 }
 
 function parseHostTasks(values: readonly unknown[]): TaskRecord[] {
@@ -481,6 +482,14 @@ export class HostTaskLedger {
         const task = this.document.tasks.find(task => task.id === action.taskId)
         if (task === undefined) throw new Error('task not found')
         if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
+        // The task content (title/description/prompt) is the record of what
+        // was planned; once an execution started it must not change under a
+        // running session or an executed history. Execution targets stay
+        // editable (they only affect future runs).
+        if (hasContentPatch(action.patch) && !canEditTaskContent(task)) {
+          throw new Error('task has already been executed')
+        }
+        if ('title' in action.patch && action.patch.title?.trim() === '') throw new Error('title is required')
         this.document.tasks = [...applyUpdateTask(this.document.tasks, action.taskId, action.patch, now)]
         break
       }
@@ -574,7 +583,7 @@ export class HostTaskLedger {
     try {
       const parsed = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<LedgerDocument>
       if (parsed.schemaVersion !== TASK_BOARD_SCHEMA_VERSION || !Array.isArray(parsed.tasks)) throw new Error('unsupported ledger schema')
-      const tasks = parseHostTasks(parsed.tasks)
+      const tasks = parseHostTasks(parsed.tasks).map(task => ({ ...task, executions: retainRecentExecutions(task.executions) }))
       const invalidScheduleIds = (parsed.tasks as unknown[]).flatMap(value => {
         if (typeof value !== 'object' || value === null) return []
         const row = value as { id?: unknown; schedule?: unknown }

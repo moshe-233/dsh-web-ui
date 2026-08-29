@@ -45,7 +45,7 @@
 | `data-dsh-wallpaper-active` | html + body（body/html 级，另行管理） | WE 壁纸挂载期间置 `true`，卸载 / 禁用清除；供皮肤 CSS 与壁纸中和规则锚定（#734） |
 | `data-dsh-wallpaper-surface` | 官方 shell 全视口背景元素 + 侧栏工作区淡化条（元素级） | `WallpaperController.markWallpaperSurfaces()` 在 WE 壁纸挂载期间打标（全视口 bg-base 背景 + `data-slot="sidebar.workspaces"` 内渐变淡化条），命中 `html[data-dsh-wallpaper-active] [data-dsh-wallpaper-surface]` 中和；卸载清除，不含哈希类依赖（#734） |
 
-## part 组（31 行，含各 owner 行）
+## part 组（38 行，含各 owner 行）
 
 shell 区域（owner: shell）：
 
@@ -59,6 +59,7 @@ shell 区域（owner: shell）：
 | `queue-dock` | 排队条；`[data-queue-dock]` |
 | `turn-tail` | turn 尾行；`[data-turn-tail]` |
 | `resize-handle` | 列宽手柄；`[data-side]` |
+| `new-session` | 侧栏新会话按钮；官方稳定属性落地前由兼容适配器从 `button[class*="newSession"]` 补打，皮肤不得依赖本地化文案 |
 
 family / 插件区域：
 
@@ -77,12 +78,12 @@ family / 插件区域：
 | `dialog` | git-graph | 图对话框；`[data-gitgraph-dialog]` |
 | `graph-row` | git-graph | 提交行；dialog 内行容器 |
 | `ref` | git-graph | 分支徽标；`[data-gitgraph-ref]` |
+| `worktree-create` / `worktree-manage` | git-graph | worktree 创建/管理入口按钮；分支弹层 footer 内裸值按钮 |
 | `sprite` | pet | 精灵；`[data-dsh-pet-root]` 子树 float 容器 |
 | `bubble` | pet | 气泡容器 |
 | `panel` | pet | 交互面板；`[data-placement]` |
 | `summon-button` | pet | 召唤钮；`[data-testid="pet-summon"]` |
 | `plugin-item` | web-ui-settings | 家族插件设置卡；`[data-slot="web-ui.plugin.item"]` 内 entry |
-| `marketplace-card` | community-plugins | 社区插件卡；section 内 grid 项 |
 | `head` | skill-explorer | 技能中心模态卡头部；`[data-dsh-plugin="skill-explorer"] [data-dsh-part="card"] > header` |
 | `card` | skill-explorer | 技能中心模态卡；`[data-dsh-plugin="skill-explorer"] [data-dsh-part="card"]` |
 | `tab-bar` / `tab` | skill-explorer | 技能中心页签条/页签；`[data-dsh-plugin="skill-explorer"] [data-dsh-part="tab-bar"]` / `[data-dsh-plugin="skill-explorer"] [data-dsh-part="tab"]` |
@@ -102,23 +103,30 @@ family / 插件区域：
 | `row` | session-id | 会话列表行；面板内行容器（`[data-dsh-part="row"]`） |
 | `copy` | session-id | 每行复制按钮；`button[data-dsh-part="copy"]` |
 | `search` | session-id | 面板搜索输入框；`input[type="search"][data-dsh-part="search"]` |
+| `sprite` | miku-pet | 宠物帧舞台；`[data-dsh-plugin="miku-pet"] [data-dsh-part="sprite"]` |
+| `menu` | miku-pet | 悬停菜单（两级）；`[data-dsh-part="menu"]` |
+| `stats` | miku-pet | 左侧属性彩条；`[data-dsh-part="stats"]` |
+| `shop` | miku-pet | 商店居中窗口；`[data-dsh-part="shop"]` |
+| `bubble` | miku-pet | 对话气泡；`[data-dsh-part="bubble"]` |
+| `float` | miku-pet | 互动飘字；`[data-dsh-part="float"]` |
 
-## plugin 组（12 个，含停更 aionui-panel）
+## plugin 组（13 个，含停更 aionui-panel）
 
 | data-dsh-plugin | owner | 锚定方式 |
 | --- | --- | --- |
 | `task-board` | dsh-task-board | `[data-dsh-taskboard-view]` / `[data-dsh-taskboard-entry]` / slot entry id |
 | `ssh` | dsh-ssh | `[data-dsh-ssh-view]` / `[data-dsh-ssh-entry]` |
 | `git-graph` | dsh-git-graph | slot entry id `git-graph`；`[data-gitgraph-chip-anchor]` / `[data-gitgraph-dialog]` |
-| `pet` | dsh-pet | `[data-dsh-pet-root]`；settings.section id `pet` |
+| `pet` | dsh-pet | `[data-dsh-pet-root]`；一级设置分区 settings.section id `pet`（只列内置与已安装宠物） |
 | `remote-web-ui` | dsh-remote-web-ui | slot entry id `remote-web-ui` |
-| `web-ui-settings` | dsh-web-ui-settings | settings.section id `web-ui-plugins` |
-| `community-plugins` | dsh-community-plugins | settings.section id `community-plugins` |
+| `web-ui-settings` | dsh-web-settings | settings.section id `web-ui-plugins` |
 | `skill-explorer` | dsh-skill-explorer | `[data-dsh-skill-explorer-view]` / `[data-dsh-skill-explorer-entry]` |
-| `doctor` | dsh-doctor | web-ui.plugin.item 槽 entry id `doctor`（设置 → Web UI 插件 → Doctor 卡片）；卡片内 `[data-dsh-plugin="doctor"]` |
+| `doctor` | dsh-doctor | web-ui.plugin.item 槽 entry id `doctor`（设置 → Web 插件 → Doctor 卡片）；卡片内 `[data-dsh-plugin="doctor"]` |
 | `aionui-panel` | dsh-aionui-panel（停更） | dock entry id `aionui-*` |
-| `skin-center` | skins/skin-center | settings.section 一级页 |
+| `dsh-web-ui-market` | dsh-market | 创意工坊商店一级页（settings.section id `dsh-web-ui-market`），商店卡与目录条目容器 |
+| `skin-center` | skins/skin-center | 一级设置分区 settings.section id `skin-center`（列已安装皮肤，属内置源时显式标记） |
 | `session-id` | dsh-session-id | footer action slot entry id `session-id`；`[data-dsh-plugin="session-id"]`（面板 overlay 根 + 入口触发器） |
+| `miku-pet` | dsh-miku-pet | 宠物浮层根 `[data-dsh-plugin="miku-pet"]`；host 路由前缀 `/miku-pet/*`；设置页 settings.section id `miku-pet-config` |
 
 ## 已知脆弱点（上游主题缝 PR 诉求）
 

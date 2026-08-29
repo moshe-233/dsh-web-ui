@@ -8,14 +8,17 @@
  */
 import { createElement } from 'react'
 import { createRoot } from 'react-dom/client'
-import type { ClientContext, SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-ui-settings/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale) and the
-// ui-sidebar SlotMap merge (the 'sidebar.remote' hole).
+// ui-sidebar SlotMap merge (the 'sidebar.footer.action' hole).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: pulls the settings-surface SlotMap merge (the 'settings.section'
 // entry) and the ctx.settingsScope Context merge.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+// Type-only: pulls the ctx.slots merge (the renderer owns the slot registry since 0.1.2).
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import { FooterRemoteEntry } from './FooterRemoteEntry.tsx'
 import { RemoteEntry } from './RemoteEntry.tsx'
@@ -24,8 +27,16 @@ import { RemoteSettingsCard, RemoteSettingsCardController, type RemoteSettings }
 import { en, zh, type RemoteKey } from './locales.ts'
 import { PAIR_FAILED_MARKER, runPairBootFlow } from './deep-link.ts'
 import { readPairGatePolicy, sendHeartbeat } from './pair-api.ts'
-import { channelTransition, installRemoteChannel, isLoopbackHostname, remoteChannelRequired } from './remote-channel.ts'
+import {
+  channelTransition,
+  installRemoteChannel,
+  isLoopbackHostname,
+  remoteChannelRequired,
+  REMOTE_CHANNEL_BOOT_GLOBAL,
+  type RemoteChannelBootSeat,
+} from './remote-channel.ts'
 import { FenceNotice } from './FenceNotice.tsx'
+import { reportDailyHeartbeat } from './telemetry.ts'
 
 export type { RemoteEntryProps } from './RemoteEntry.tsx'
 export type { PanelState, RemotePanelProps } from './RemotePanel.tsx'
@@ -47,7 +58,6 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * sidebar shell on deployments that carry the feature seat; the shell
      * passes only its column display state.
      */
-    'sidebar.remote': { kind: 'single'; scope: 'root'; owner: SidebarRemoteOwnerProps }
     /**
      * The child slot the Web UI plugin group declares; this card registers
      * into the group instead of the top-level `settings.plugin.item` list.
@@ -73,7 +83,7 @@ export interface SettingsPluginItemOwnerProps {
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /**
-     * Optional rc.6 compatibility binder provided by dsh-web-ui-settings;
+     * Optional rc.6 compatibility binder provided by dsh-web-settings;
      * absent when that group plugin is not installed, so callers fall back to
      * the official settings scope.
      */
@@ -99,7 +109,17 @@ export const inject = ['slots', 'locale', 'connection', 'settingsScope', 'remote
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'remote-web-ui: dictionaries')
+  // Anonymous install heartbeat (docs/telemetry.md): one beat per browser per
+  // UTC day, package name only, silent failure.
+  reportDailyHeartbeat([{ name: '@linxin666/dsh-remote-web-ui' }])
+
+  ctx.effect(() => {
+    try {
+      return ctx.locale.register(NS, { zh, en })
+    } catch {
+      return () => {}
+    }
+  }, 'remote-web-ui: dictionaries')
 
   const t = ctx.locale.bind(NS)
   const binder = ctx.get('webUiSettings') ?? ctx.settingsScope
@@ -114,35 +134,29 @@ export function apply(ctx: ClientContext): void {
   // Sidebar foot entry: the shell declares 'sidebar.remote' in unconstrained
   // order, so registration is declaration-aware — slots.inject waits on the
   // declaration, removes the contribution when it collapses, and re-runs
-  // after a redeclaration. The entry follows the plugin's enabled setting:
-  // toggling it off removes the trigger, toggling it back on re-registers it.
-  ctx.slots.inject('sidebar.remote', () => {
-    let disposeEntry: (() => void) | undefined
-    const syncEntry = (): void => {
-      if (enabled() && disposeEntry === undefined) {
-        disposeEntry = ctx.slots.register({ name: 'sidebar.remote', locale: NS }, RemoteEntry)
-      } else if (!enabled() && disposeEntry !== undefined) {
-        disposeEntry()
-        disposeEntry = undefined
-      }
-    }
-    const unsubscribe = settingsScope.subscribe(syncEntry)
-    syncEntry()
-    return () => {
-      unsubscribe()
-      disposeEntry?.()
-    }
-  })
-
-  // Current shells declare `sidebar.footer.action` instead of the legacy
-  // `sidebar.remote` seat; this fallback registers the same entry there when
-  // the legacy seat never arrives (declaration-aware: only one of the two
-  // injects ever fires, so the trigger can never render twice).
+  // The sidebar foot seat is `sidebar.footer.action` in the 0.1.2 shell
+  // composition (the legacy `sidebar.remote` seat is gone upstream). The
+  // deep-link workspace source is the head row of the workspaces projection
+  // (host order), read through the injected controller. The service lookup
+  // stays lazy: `workspaces` may register after apply() runs (deep-link.ts
+  // polls for it), so a source captured once here would stay undefined for
+  // the page lifetime.
+  const getTargetWorkspaceId = (): string | undefined => {
+    const workspacesSource = ctx.get('workspaces') as {
+      list: { getSnapshot(): { items: ReadonlyArray<{ workspaceId: unknown }> } }
+    } | undefined
+    const head = workspacesSource?.list.getSnapshot().items[0]
+    return head === undefined ? undefined : String(head.workspaceId)
+  }
   ctx.slots.inject('sidebar.footer.action', () => {
     let disposeEntry: (() => void) | undefined
     const syncEntry = (): void => {
       if (enabled() && disposeEntry === undefined) {
-        disposeEntry = ctx.slots.register({ name: 'sidebar.footer.action', id: 'remote-web-ui', locale: NS }, FooterRemoteEntry)
+        try {
+          disposeEntry = ctx.slots.register({ name: 'sidebar.footer.action', id: 'remote-web-ui', locale: NS, inject: () => ({ getTargetWorkspaceId }) }, FooterRemoteEntry)
+        } catch {
+          // ignore registration collision
+        }
       } else if (!enabled() && disposeEntry !== undefined) {
         disposeEntry()
         disposeEntry = undefined
@@ -160,16 +174,20 @@ export function apply(ctx: ClientContext): void {
   // settings namespace, contributed to the Web UI plugin group.
   const remoteSettings = new RemoteSettingsCardController(settingsScope)
   ctx.slots.inject('web-ui.plugin.item', () => {
-    const unregister = ctx.slots.register({
-      name: 'web-ui.plugin.item',
-      id: 'remote-web-ui',
-      order: 90,
-      locale: NS,
-      inject: () => remoteSettings.inject(),
-    }, RemoteSettingsCard)
-    return () => {
-      remoteSettings.dispose()
-      unregister()
+    try {
+      const unregister = ctx.slots.register({
+        name: 'web-ui.plugin.item',
+        id: 'remote-web-ui',
+        order: 90,
+        locale: NS,
+        inject: () => remoteSettings.inject(),
+      }, RemoteSettingsCard)
+      return () => {
+        remoteSettings.dispose()
+        unregister()
+      }
+    } catch {
+      return () => {}
     }
   })
 
@@ -228,16 +246,41 @@ export function apply(ctx: ClientContext): void {
     settingsScope.getSnapshot(),
     hostPairingPolicy,
   )
+  // The parse-time boot patch (issue #987), when the served index carried
+  // it: already installed before any boot entry ran, so adopting its seat
+  // beats patching a second time (which would double-rewrite onto
+  // /remote/remote/...).
+  const bootSeat = (): RemoteChannelBootSeat | undefined =>
+    (window as unknown as Record<string, RemoteChannelBootSeat | undefined>)[REMOTE_CHANNEL_BOOT_GLOBAL]
   const syncChannel = (): void => {
     const transition = channelTransition(channelActive(), disposeChannel !== undefined)
     if (transition === 'install') {
-      disposeChannel = ctx.effect(() => {
-        const restore = installRemoteChannel(window, { onUnpaired: handleUnpaired, onPaired: hideFenceNotice })
-        return restore
-      }, 'remote-web-ui: remote desktop channel')
+      const seat = bootSeat()
+      if (seat !== undefined) {
+        seat.onUnpaired = handleUnpaired
+        seat.onPaired = hideFenceNotice
+        // Replay a signal raised before adoption (early unpaired responses).
+        if (seat.pendingUnpaired) {
+          seat.pendingUnpaired = false
+          handleUnpaired()
+        }
+        disposeChannel = ctx.effect(() => () => {
+          seat.onUnpaired = null
+          seat.onPaired = null
+        }, 'remote-web-ui: remote desktop channel (boot patch)')
+      } else {
+        disposeChannel = ctx.effect(() => {
+          const restore = installRemoteChannel(window, { onUnpaired: handleUnpaired, onPaired: hideFenceNotice })
+          return restore
+        }, 'remote-web-ui: remote desktop channel')
+      }
     } else if (transition === 'retire' && disposeChannel !== undefined) {
       disposeChannel()
       disposeChannel = undefined
+      // Retire the provisional parse-time install with the channel: the
+      // desktop now rides plain /api, so the rewrite must go (its seat
+      // removes the global; a later re-activation patches afresh).
+      bootSeat()?.restore()
       // Retire the notice with the channel: once requirePairingForLan turns
       // off (or the plugin is disabled) the desktop rides plain /api again,
       // so an unpaired notice raised while the channel was briefly active
@@ -245,6 +288,10 @@ export function apply(ctx: ClientContext): void {
       // installed channel is the only path that raises the notice, so with
       // the channel gone nothing can re-raise it (issue #808).
       hideFenceNotice()
+    } else if (transition === 'none' && !channelActive()) {
+      // The channel was never adopted (policy settled to off before apply
+      // ran): the provisional boot patch still retires.
+      bootSeat()?.restore()
     }
   }
   settingsScope.subscribe(syncChannel)

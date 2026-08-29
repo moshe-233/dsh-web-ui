@@ -9,8 +9,11 @@ changes, nothing runs on the host.
 
 ## What it does
 
-- Adds a "Session ID" trigger beside the sidebar settings row (icon in the
-  56px rail, labeled row in the wide sidebar).
+- Adds a "Session ID" trigger beside the sidebar settings row: an icon-only
+  button in both the 56px rail and the wide sidebar (the label stays as the
+  accessible name and hover tooltip).
+- In the rail it stacks vertically with the update/remote actions on the rail
+  centerline; in the wide sidebar it sits inline with them.
 - Opens a centered panel listing every session: display title, full session id
   (monospace), and a per-row "Copy" button. The current session is marked.
 - A search box filters the list locally by title or id substring (read-only,
@@ -34,8 +37,8 @@ at the bottom of the sidebar.
 ### From the repository (development)
 
 ```sh
-git clone https://github.com/zhu1090093659/dsh-web-ui.git
-cd dsh-web-ui
+git clone https://github.com/zhu1090093659/dsh-web.git
+cd dsh-web
 pnpm install
 pnpm -r build
 dsh plugin --profile web add link:$(pwd)/packages/dsh-session-id
@@ -60,6 +63,10 @@ dsh plugin --profile web add link:$(pwd)/packages/dsh-session-id
   newer shells). On older shells the entry does not render.
 - Read-only viewer: it shows and copies ids, it does not open or manage
   sessions.
+
+## Telemetry
+
+The browser half sends one anonymous install heartbeat per UTC day to dsh-market.com: a random localStorage id plus this package's name, nothing else. The server stores only a salted hash of that id, never IP addresses, and exposes aggregate counts only. See [docs/telemetry.md](../../docs/telemetry.md) for the full contract.
 
 ## License
 

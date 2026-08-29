@@ -29,7 +29,6 @@ import {
   parseMdl,
   parsePkg,
   parseTex,
-  parseTexToRGBA,
   readPkgEntry,
   extractSceneResourceFromDir,
   TexUnsupportedError,
@@ -1195,16 +1194,39 @@ describe('extractSceneMainImageFromDir', () => {
       mkdirSync(join(tmp, 'models/car'), { recursive: true })
       writeFileSync(join(tmp, 'models/car/car.mdl'), mdlBuf)
       writeFileSync(join(tmp, 'scene.json'), JSON.stringify({
+        general: { fov: 50 },
         camera: { eye: '1 2 3', center: '0 0 0', up: '0 1 0', fov: 60 },
         objects: [{ name: 'car', model: 'models/car/car.mdl', origin: '0 0 0', angles: '0 0 0', scale: '1 1 1' }]
       }), 'utf8')
 
       const manifest = buildSceneManifestFromDir(tmp, 'tok_test')
       expect(manifest?.is3D).toBe(true)
+      // Older scenes can carry a camera-local override; it wins over the
+      // standard scene.general FOV.
       expect(manifest?.camera?.fov).toBe(60)
       expect(manifest?.models?.length).toBe(1)
       expect(manifest?.models?.[0].meshes.length).toBe(1)
       expect(manifest?.models?.[0].meshes[0].materialPath).toBe('materials/car/body.json')
+      expect(manifest?.models?.[0].meshes[0].uv2B64).toBeUndefined()
+
+      const writeFovScene = (general: Record<string, unknown> | undefined): void => {
+        writeFileSync(join(tmp, 'scene.json'), JSON.stringify({
+          ...(general === undefined ? {} : { general }),
+          camera: { eye: '1 2 3', center: '0 0 0', up: '0 1 0' },
+          objects: [
+            { name: 'car', model: 'models/car/car.mdl', origin: '0 0 0', angles: '0 0 0', scale: '1 1 1' },
+            { light: 'point', origin: '1 2 3', color: '0.5 0.25 0.125', intensity: 2, radius: 16 },
+          ],
+        }), 'utf8')
+      }
+      writeFovScene({ fov: 50 })
+      const litManifest = buildSceneManifestFromDir(tmp, 'tok_general_fov')
+      expect(litManifest?.camera?.fov).toBe(50)
+      expect(litManifest?.pointLights).toEqual([{ origin: [1, 2, 3], color: [1, 0.5, 0.25], radius: 16 }])
+      writeFovScene({ fov: 0 })
+      expect(buildSceneManifestFromDir(tmp, 'tok_invalid_fov')?.camera?.fov).toBe(50)
+      writeFovScene(undefined)
+      expect(buildSceneManifestFromDir(tmp, 'tok_default_fov')?.camera?.fov).toBe(50)
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }
@@ -1318,6 +1340,55 @@ describe('extractSceneMainImageFromDir', () => {
       expect(layer?.alpha).toBeCloseTo(0.8)
       expect(layer?.angle).toBeCloseTo(0.5)
       expect(layer?.uvCrop).toEqual([0, 0, 0.5, 0.5]) // 128/256 content rect
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  it('retains author time-period video layers and schedule defaults', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'dsh-time-scene-'))
+    try {
+      mkdirSync(join(tmp, 'models'), { recursive: true })
+      mkdirSync(join(tmp, 'materials'), { recursive: true })
+      const videoTex = buildTex({
+        width: 1920,
+        height: 1080,
+        containerVersion: 4,
+        freeImageFormat: -1,
+        isVideoMp4: true,
+        mipmaps: [{ width: 1920, height: 1080, data: encoder.encode('....ftypisom....video') }],
+      })
+      for (const period of ['morning', 'day', 'dusk', 'night']) {
+        writeFileSync(join(tmp, 'models', period + '.json'), JSON.stringify({ material: 'materials/' + period + '.json', width: 1920, height: 1080 }))
+        writeFileSync(join(tmp, 'materials', period + '.json'), JSON.stringify({ passes: [{ shader: 'genericimage4', textures: [period] }] }))
+        writeFileSync(join(tmp, 'materials', period + '.tex'), videoTex)
+      }
+      writeFileSync(join(tmp, 'project.json'), JSON.stringify({
+        file: 'scene.json',
+        general: { properties: {
+          timevarying: { type: 'bool', value: true },
+          morningtime: { type: 'textinput', value: '5' },
+          daytime: { type: 'textinput', value: '9' },
+          dusktime: { type: 'textinput', value: '17.5' },
+          nighttime: { type: 'textinput', value: '21' },
+        } },
+      }))
+      writeFileSync(join(tmp, 'scene.json'), JSON.stringify({
+        general: { orthogonalprojection: { width: 1920, height: 1080 } },
+        objects: ['morning', 'day', 'dusk', 'night'].map((period, index) => ({
+          name: period,
+          image: 'models/' + period + '.json',
+          origin: '960 540 0',
+          visible: { user: { name: 'display', condition: String(index) }, value: period === 'day' },
+        })),
+      }))
+
+      const manifest = buildSceneManifestFromDir(tmp, 'tok_time')
+      expect(manifest?.timeSchedule).toEqual({ morning: 5, day: 9, dusk: 17.5, night: 21 })
+      expect(manifest?.layers.map(layer => layer.timePeriod)).toEqual(['morning', 'day', 'dusk', 'night'])
+      expect(manifest?.layers.every(layer => layer.videoUrl?.includes('/scene-resource/tok_time/'))).toBe(true)
+      const mp4 = extractSceneResourceFromDir(tmp, 'materials/day.tex')
+      expect(new TextDecoder().decode(mp4 ?? new Uint8Array())).toContain('ftypisom')
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }
@@ -1497,7 +1568,7 @@ describe('untrusted input allocation caps (#717 hardening)', () => {
       i32le(20000), i32le(20000),
       i32le(0), i32le(0), i32le(0),
     )
-    expect(() => parseTexToRGBA(tex)).toThrow(/invalid mipmap dimensions/)
+    expect(() => decodeTex(tex)).toThrow(/invalid mipmap dimensions/)
   })
 
   it('rejects png headers with oversized dimensions', () => {

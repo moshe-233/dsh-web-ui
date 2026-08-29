@@ -2,8 +2,8 @@
 'use strict'
 
 /**
- * sync-shared — mirror shared/client/settings (the family-shared settings
- * card trio) into the consuming plugin packages.
+ * sync-shared — mirror shared/client/settings and shared/host (the
+ * family-shared modules) into the consuming plugin packages.
  *
  * The trio lives exactly once under shared/client/settings and is copied,
  * with a generated-file header, to each consumer's src/client/. The copies
@@ -27,7 +27,7 @@ export const REPO_ROOT = resolve(SCRIPT_DIR, '..')
  * live exactly once under shared/; consumers import the committed copy.
  */
 // Consumers of the settings card trio: one list, three derivations below.
-const SETTINGS_CONSUMERS = ['dsh-pet', 'dsh-task-board', 'dsh-remote-web-ui', 'dsh-aionui-panel', 'dsh-tool-describe-image', 'dsh-community-plugins', 'dsh-desktop-launcher', 'dsh-doctor']
+const SETTINGS_CONSUMERS = ['dsh-pet', 'dsh-task-board', 'dsh-remote-web-ui', 'dsh-tool-describe-image', 'dsh-desktop-launcher', 'dsh-doctor', 'dsh-market']
 
 const MANIFEST = [
   {
@@ -50,7 +50,6 @@ const MANIFEST = [
     source: 'shared/host/poll-guard.ts',
     targets: [
       'packages/dsh-git-graph/src/host/poll-guard.ts',
-      'packages/dsh-aionui-panel/src/host/poll-guard.ts',
     ],
   },
   {
@@ -64,13 +63,23 @@ const MANIFEST = [
       'packages/dsh-remote-web-ui/src/dsh-home.ts',
       'packages/dsh-ssh/src/dsh-home.ts',
       'packages/dsh-desktop-launcher/src/dsh-home.ts',
-      'packages/dsh-web-ui-settings/src/dsh-home.ts',
+      'packages/dsh-web-settings/src/dsh-home.ts',
+      'packages/dsh-market/src/dsh-home.ts',
+      'packages/dsh-git-graph/src/host/dsh-home.ts',
     ],
   },
   {
     file: 'git-runner.ts',
     source: 'shared/host/git-runner.ts',
-    targets: ['packages/dsh-aionui-panel/src/host/git-runner.ts', 'packages/dsh-git-graph/src/host/git-runner.ts'],
+    targets: ['packages/dsh-git-graph/src/host/git-runner.ts'],
+  },
+  {
+    file: 'legacy-migration.ts',
+    source: 'shared/host/legacy-migration.ts',
+    targets: [
+      'packages/dsh-plugin-manager/src/host/legacy-migration.ts',
+      'packages/dsh-doctor/src/agent/legacy-migration.ts',
+    ],
   },
   {
     file: 'mount-once.ts',
@@ -82,27 +91,80 @@ const MANIFEST = [
       'packages/dsh-liangshen/src/mount-once.ts',
       'packages/dsh-task-board/src/mount-once.ts',
       'packages/dsh-git-graph/src/mount-once.ts',
-      'packages/dsh-aionui-panel/src/mount-once.ts',
       'packages/dsh-community-plugins/src/mount-once.ts',
       'packages/dsh-plugin-manager/src/mount-once.ts',
-      'packages/dsh-web-ui-settings/src/mount-once.ts',
+      'packages/dsh-web-settings/src/mount-once.ts',
       'packages/dsh-tool-describe-image/src/mount-once.ts',
       'packages/dsh-desktop-launcher/src/mount-once.ts',
       'packages/dsh-skill-explorer/src/mount-once.ts',
       'packages/dsh-doctor/src/mount-once.ts',
       'packages/skins/skin-center/src/mount-once.ts',
+      'packages/dsh-market/src/mount-once.ts',
     ],
   },
 
+  {
+    file: 'telemetry.ts',
+    source: 'shared/client/telemetry.ts',
+    targets: [
+      'packages/dsh-market/src/client/telemetry.ts',
+      'packages/dsh-pet/src/client/telemetry.ts',
+      'packages/skins/skin-center/src/client/telemetry.ts',
+      'packages/dsh-desktop-launcher/src/client/telemetry.ts',
+      'packages/dsh-doctor/src/client/telemetry.ts',
+      'packages/dsh-git-graph/src/client/telemetry.ts',
+      'packages/dsh-plugin-manager/src/client/telemetry.ts',
+      'packages/dsh-remote-web-ui/src/client/telemetry.ts',
+      'packages/dsh-session-id/src/client/telemetry.ts',
+      'packages/dsh-skill-explorer/src/client/telemetry.ts',
+      'packages/dsh-ssh/src/client/telemetry.ts',
+      'packages/dsh-task-board/src/client/telemetry.ts',
+      'packages/dsh-tool-describe-image/src/client/telemetry.ts',
+      'packages/dsh-web-settings/src/client/telemetry.ts',
+    ],
+  },
   {
     file: 'sse-leader.ts',
     source: 'shared/client/sse-leader.ts',
     targets: ['packages/dsh-git-graph/src/client/sse-leader.ts'],
   },
   {
+    file: 'pair-access.ts',
+    source: 'shared/host/pair-access.ts',
+    targets: ['packages/dsh-git-graph/src/host/pair-access.ts', 'packages/dsh-pet/src/pair-access.ts', 'packages/dsh-skill-explorer/src/pair-access.ts'],
+  },
+  {
     file: 'loopback.ts',
     source: 'shared/host/loopback.ts',
-    targets: ['packages/dsh-ssh/src/loopback.ts', 'packages/dsh-git-graph/src/host/loopback.ts', 'packages/dsh-aionui-panel/src/host/loopback.ts', 'packages/dsh-remote-web-ui/src/loopback.ts', 'packages/dsh-task-board/src/loopback.ts', 'packages/dsh-skill-explorer/src/loopback.ts', 'packages/dsh-pet/src/loopback.ts', 'packages/dsh-plugin-manager/src/host/loopback.ts', 'packages/dsh-tool-describe-image/src/loopback.ts', 'packages/dsh-desktop-launcher/src/loopback.ts', 'packages/dsh-doctor/src/host/loopback.ts'],
+    targets: ['packages/dsh-ssh/src/loopback.ts', 'packages/dsh-git-graph/src/host/loopback.ts', 'packages/dsh-remote-web-ui/src/loopback.ts', 'packages/dsh-task-board/src/loopback.ts', 'packages/dsh-skill-explorer/src/loopback.ts', 'packages/dsh-pet/src/loopback.ts', 'packages/dsh-plugin-manager/src/host/loopback.ts', 'packages/dsh-tool-describe-image/src/loopback.ts', 'packages/dsh-desktop-launcher/src/loopback.ts', 'packages/dsh-doctor/src/host/loopback.ts', 'packages/dsh-market/src/loopback.ts'],
+  },
+  {
+    file: 'http.ts',
+    source: 'shared/host/http.ts',
+    targets: [
+      'packages/dsh-pet/src/http.ts',
+      'packages/dsh-market/src/http.ts',
+      'packages/dsh-skill-explorer/src/http.ts',
+      'packages/dsh-desktop-launcher/src/http.ts',
+      'packages/dsh-web-settings/src/http.ts',
+      'packages/dsh-tool-describe-image/src/http.ts',
+      'packages/dsh-doctor/src/host/http.ts',
+      'packages/dsh-git-graph/src/host/http.ts',
+      'packages/dsh-ssh/src/http.ts',
+      'packages/dsh-plugin-manager/src/host/http.ts',
+      'packages/skins/skin-center/src/http.ts',
+      'packages/dsh-remote-web-ui/src/http.ts',
+      'packages/dsh-task-board/src/http.ts',
+    ],
+  },
+  {
+    file: 'vitest.setup.ts',
+    source: 'shared/vitest.setup.ts',
+    targets: [
+      'packages/dsh-web-settings/vitest.setup.ts',
+      'packages/dsh-tool-describe-image/vitest.setup.ts',
+      'packages/dsh-remote-web-ui/vitest.setup.ts',
+    ],
   },
   {
     file: 'sidebar-entry-core.ts',

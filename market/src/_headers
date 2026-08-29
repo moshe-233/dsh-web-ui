@@ -1,7 +1,11 @@
 /manifest/*
 	Cache-Control: public, max-age=300
+	Access-Control-Allow-Origin: *
 
 /assets/*
+	Cache-Control: public, max-age=86400
+
+/tryon-assets/*
 	Cache-Control: public, max-age=86400
 
 /official-facade.js
@@ -18,3 +22,9 @@
 
 /preview.html
 	Cache-Control: public, max-age=0, must-revalidate
+
+/robots.txt
+	Cache-Control: public, max-age=300
+
+/sitemap.xml
+	Cache-Control: public, max-age=300

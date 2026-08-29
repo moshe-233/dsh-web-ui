@@ -4,10 +4,11 @@
  * and the active-skin selection roundtrip with the same-origin fence.
  */
 
+import { createHash } from 'node:crypto'
 import { createServer, request as httpRequest } from 'node:http'
 import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -112,6 +113,7 @@ function makeRoutes() {
   return makeSkinCenterV2Routes({
     loadCatalog: () => loadSkinCatalog({ builtinDir: builtin, userDir: join(root, 'user') }),
     activeStatePath: statePath,
+    shippedSkinIds: () => new Set(['harbor', 'plain', 'patched', 'hooked', 'evil']),
   })
 }
 
@@ -126,6 +128,45 @@ describe('v2 catalog route', () => {
     expect(res.jsonBody.skins).toHaveLength(1)
     expect(res.jsonBody.skins[0].manifest.id).toBe('harbor')
     expect(res.jsonBody.diagnostics).toHaveLength(1)
+    await server.close()
+  })
+
+  it('writes family JSON headers through the shared writer', async () => {
+    writeFixtureSkin('harbor')
+    const server = await serve(makeRoutes())
+    const res = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/catalog`)
+    expect(res.status).toBe(200)
+    expect(String(res.headers['content-type'])).toBe('application/json; charset=utf-8')
+    expect(String(res.headers['referrer-policy'])).toBe('no-referrer')
+    await server.close()
+  })
+})
+
+describe('v2 catalog installed-only filter', () => {
+  it('lists shipped builtins and user skins, hiding catalog-only builtins', async () => {
+    writeFixtureSkin('stock')
+    writeFixtureSkin('pool')
+    const userDir = join(root, 'user')
+    mkdirSync(join(userDir, 'hatch'), { recursive: true })
+    writeFileSync(join(userDir, 'hatch', 'skin.json'), JSON.stringify({
+      skinManifestVersion: 2,
+      id: 'hatch',
+      name: 'hatch',
+      nameEn: 'hatch',
+      version: '1.0.0',
+      author: 'tester',
+      contributes: { stylesheet: 'skin.css' },
+    }))
+    writeFileSync(join(userDir, 'hatch', 'skin.css'), '.a { color: red; }')
+    const routes = makeSkinCenterV2Routes({
+      loadCatalog: () => loadSkinCatalog({ builtinDir: builtin, userDir }),
+      activeStatePath: statePath,
+      shippedSkinIds: () => new Set(['stock']),
+    })
+    const server = await serve(routes)
+    const res = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/catalog`)
+    expect(res.status).toBe(200)
+    expect(res.jsonBody.skins.map((s: { manifest: { id: string } }) => s.manifest.id)).toEqual(['hatch', 'stock'])
     await server.close()
   })
 })
@@ -206,6 +247,105 @@ describe('v2 hooks trust gate', () => {
     expect(css.status).toBe(200)
     await server.close()
   })
+
+  function writeMarketInstalledSkin(id: string): string {
+    const dir = join(root, 'user', id)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'skin.json'), JSON.stringify({
+      skinManifestVersion: 2,
+      id,
+      name: id,
+      nameEn: id,
+      version: '1.0.0',
+      author: 'contributed',
+      contributes: { stylesheet: 'skin.css' },
+      facets: { client: { entry: 'hooks.mjs', apiVersion: 'x-org.linxin666.skin-center/v1alpha1' } },
+    }, null, 2))
+    writeFileSync(join(dir, 'skin.css'), '.a { color: red; }')
+    writeFileSync(join(dir, 'hooks.mjs'), 'export default function defineSkinHooks() { return { apply() {} } }\n')
+    const files: Record<string, string> = {}
+    for (const rel of ['skin.json', 'skin.css', 'hooks.mjs']) {
+      files[rel] = createHash('sha256').update(readFileSync(join(dir, rel))).digest('hex')
+    }
+    writeFileSync(join(dir, 'dsh-market.provenance.json'), JSON.stringify({
+      version: 1,
+      source: 'https://dsh-market.com',
+      kind: 'skin',
+      id,
+      installedAt: new Date().toISOString(),
+      files,
+    }))
+    return dir
+  }
+
+  it('serves hooks for user skins whose bytes hash-match official-market provenance (issue #1073)', async () => {
+    writeMarketInstalledSkin('matrix')
+    const routes = makeSkinCenterV2Routes({
+      loadCatalog: () => loadSkinCatalog({ builtinDir: builtin, userDir: join(root, 'user') }),
+      activeStatePath: statePath,
+    })
+    const server = await serve(routes)
+    const res = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/skins/matrix/hooks.mjs`)
+    expect(res.status).toBe(200)
+    expect(res.text).toContain('defineSkinHooks')
+    const catalog = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/catalog`)
+    const row = catalog.jsonBody.skins.find((s: any) => s.manifest.id === 'matrix')
+    expect(row.warnings.join(' ')).not.toContain('refused')
+    await server.close()
+  })
+
+  it('serves hooks for an exact reviewed legacy Workshop install without provenance', async () => {
+    const userDir = join(root, 'user')
+    const reviewed = join(import.meta.dirname, '..', 'skins', 'matrix')
+    const dir = join(userDir, 'matrix')
+    mkdirSync(dir, { recursive: true })
+    for (const rel of ['skin.json', 'skin.css', 'hooks.mjs']) {
+      writeFileSync(join(dir, rel), readFileSync(join(reviewed, rel)))
+    }
+    const routes = makeSkinCenterV2Routes({
+      loadCatalog: () => loadSkinCatalog({ builtinDir: builtin, userDir }),
+      activeStatePath: statePath,
+    })
+    const server = await serve(routes)
+    const res = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/skins/matrix/hooks.mjs`)
+    expect(res.status).toBe(200)
+    expect(res.text).toContain('mountRain')
+    await server.close()
+  })
+
+  it('refuses hooks again when the on-disk bytes no longer match the provenance', async () => {
+    const dir = writeMarketInstalledSkin('matrix')
+    writeFileSync(join(dir, 'hooks.mjs'), 'export default () => ({ apply() {} }) // tampered\n')
+    const routes = makeSkinCenterV2Routes({
+      loadCatalog: () => loadSkinCatalog({ builtinDir: builtin, userDir: join(root, 'user') }),
+      activeStatePath: statePath,
+    })
+    const server = await serve(routes)
+    const res = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/skins/matrix/hooks.mjs`)
+    expect(res.status).toBe(403)
+    expect(res.jsonBody.error).toBe('hooks-require-review')
+    await server.close()
+  })
+
+  it('re-verifies hook bytes on every serve even when the catalog snapshot is cached', async () => {
+    const userDir = join(root, 'user')
+    const reviewed = join(import.meta.dirname, '..', 'skins', 'matrix')
+    const dir = join(userDir, 'matrix')
+    mkdirSync(dir, { recursive: true })
+    for (const rel of ['skin.json', 'skin.css', 'hooks.mjs']) {
+      writeFileSync(join(dir, rel), readFileSync(join(reviewed, rel)))
+    }
+    const snapshot = loadSkinCatalog({ builtinDir: builtin, userDir })
+    const routes = makeSkinCenterV2Routes({ loadCatalog: () => snapshot, activeStatePath: statePath })
+    const server = await serve(routes)
+    expect((await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/skins/matrix/hooks.mjs`)).status).toBe(200)
+
+    writeFileSync(join(dir, 'hooks.mjs'), 'export default () => ({ apply() {} }) // tampered after scan\n')
+    const refused = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/skins/matrix/hooks.mjs`)
+    expect(refused.status).toBe(403)
+    expect(refused.jsonBody.error).toBe('hooks-require-review')
+    await server.close()
+  })
 })
 
 describe('v2 asset route', () => {
@@ -244,6 +384,60 @@ describe('v2 active selection', () => {
     await server.close()
   })
 
+  it('roundtrips background preferences with merge semantics (issue #996)', async () => {
+    writeFixtureSkin('harbor')
+    const server = await serve(makeRoutes())
+    // The v2 state starts without a background section.
+    const initial = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/active`)
+    expect(initial.jsonBody.background).toBeNull()
+    // A remote client persists background values without naming a skin.
+    const set = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/active`, {
+      body: { background: { backgroundOpacity: 100, backgroundBlurEmpty: 4, backgroundBlurContent: 5 } },
+    })
+    expect(set.status).toBe(200)
+    expect(set.jsonBody.background).toEqual({ backgroundOpacity: 100, backgroundBlurEmpty: 4, backgroundBlurContent: 5 })
+    // A skin switch must not wipe the background section, and vice versa.
+    const skin = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/active`, { body: { active: 'harbor' } })
+    expect(skin.status).toBe(200)
+    expect(skin.jsonBody.background).toEqual({ backgroundOpacity: 100, backgroundBlurEmpty: 4, backgroundBlurContent: 5 })
+    const after = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/active`)
+    expect(after.jsonBody.active).toBe('harbor')
+    expect(after.jsonBody.background.backgroundOpacity).toBe(100)
+    await server.close()
+  })
+
+  it('clamps out-of-range background values and rejects wrongly typed ones', async () => {
+    const server = await serve(makeRoutes())
+    const clamped = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/active`, {
+      body: { background: { backgroundOpacity: 250, backgroundBlurEmpty: -2 } },
+    })
+    expect(clamped.status).toBe(200)
+    expect(clamped.jsonBody.background).toEqual({ backgroundOpacity: 100, backgroundBlurEmpty: 0 })
+    const wrongType = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/active`, {
+      body: { background: { backgroundOpacity: '100' } },
+    })
+    expect(wrongType.status).toBe(400)
+    expect(wrongType.jsonBody.error).toBe('invalid-background')
+    const notObject = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/active`, {
+      body: { background: 5 },
+    })
+    expect(notObject.status).toBe(400)
+    const empty = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/active`, { body: {} })
+    expect(empty.status).toBe(400)
+    expect(empty.jsonBody.error).toBe('nothing-to-update')
+    await server.close()
+  })
+
+  it('fences cross-site background writes', async () => {
+    const server = await serve(makeRoutes())
+    const res = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/active`, {
+      body: { background: { backgroundOpacity: 90 } },
+      headers: { 'sec-fetch-site': 'cross-site', origin: 'https://evil.example' },
+    })
+    expect(res.status).toBe(403)
+    await server.close()
+  })
+
   it('fences cross-site writes', async () => {
     writeFixtureSkin('harbor')
     const server = await serve(makeRoutes())
@@ -252,6 +446,304 @@ describe('v2 active selection', () => {
       headers: { 'sec-fetch-site': 'cross-site', origin: 'https://evil.example' },
     })
     expect(res.status).toBe(403)
+    await server.close()
+  })
+})
+/** Raw-string POST for body-contract cases (call() serializes JSON objects). */
+async function postRaw(
+  port: number,
+  path: string,
+  payload: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  return await new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        port,
+        path,
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': String(Buffer.byteLength(payload)),
+        },
+      },
+      (response) => {
+        const chunks: Buffer[] = []
+        response.on('data', (chunk) => { chunks.push(chunk as Buffer) })
+        response.on('end', () => {
+          const raw = Buffer.concat(chunks).toString('utf8')
+          let body: Record<string, unknown> = {}
+          try { body = JSON.parse(raw) as Record<string, unknown> } catch { /* non-JSON */ }
+          resolve({ status: response.statusCode ?? 0, body })
+        })
+      },
+    )
+    req.on('error', reject)
+    if (payload !== '') req.write(payload)
+    req.end()
+  })
+}
+
+describe('v2 active POST body contract (shared readJsonBody migration)', () => {
+  it('answers 400 invalid-body when the POST body is not JSON', async () => {
+    const server = await serve(makeRoutes())
+    const res = await postRaw(server.port, SKIN_CENTER_V2_PREFIX + '/active', 'not-json')
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ ok: false, error: 'invalid-body' })
+    await server.close()
+  })
+
+  it('answers 400 invalid-body to an empty POST body (was nothing-to-update)', async () => {
+    const server = await serve(makeRoutes())
+    const res = await postRaw(server.port, SKIN_CENTER_V2_PREFIX + '/active', '')
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ ok: false, error: 'invalid-body' })
+    await server.close()
+  })
+
+  it('destroys the connection on an over-limit body instead of answering JSON', async () => {
+    const server = await serve(makeRoutes())
+    await expect(
+      postRaw(server.port, SKIN_CENTER_V2_PREFIX + '/active', '{"p":"' + 'x'.repeat(16 * 1024) + '"}'),
+    ).rejects.toThrow()
+    await server.close()
+  })
+})
+
+describe('v2 uninstall route', () => {
+  it('uninstalls a user skin and resets active selection when currently active', async () => {
+    const user = join(root, 'user')
+    mkdirSync(user, { recursive: true })
+    const dir = join(user, 'user-skin')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'skin.json'), JSON.stringify({
+      skinManifestVersion: 2,
+      id: 'user-skin',
+      name: 'User Skin',
+      nameEn: 'User Skin',
+      version: '1.0.0',
+      author: 'tester',
+      contributes: { stylesheet: 'skin.css' },
+    }))
+    writeFileSync(join(dir, 'skin.css'), ':root { --dsw-alias-bg-base: #111; }')
+
+    const server = await serve(makeSkinCenterV2Routes({
+      loadCatalog: () => loadSkinCatalog({ builtinDir: builtin, userDir: user }),
+      activeStatePath: statePath,
+      userDir: user,
+    }))
+
+    // First activate it
+    const actRes = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/active`, {
+      body: { active: 'user-skin' },
+    })
+    expect(actRes.status).toBe(200)
+    expect(actRes.jsonBody.active).toBe('user-skin')
+
+    // Uninstall it
+    const res = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/skins/user-skin/uninstall`)
+    expect(res.status).toBe(200)
+    expect(res.jsonBody).toEqual({ ok: true, id: 'user-skin' })
+
+    // Active is reset to null
+    const activeCheck = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/active`)
+    expect(activeCheck.jsonBody.active).toBeNull()
+
+    // Skin is gone from catalog
+    const catCheck = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/catalog`)
+    expect(catCheck.jsonBody.skins.find((s: any) => s.manifest.id === 'user-skin')).toBeUndefined()
+
+    await server.close()
+  })
+
+  it('refuses to uninstall a builtin skin', async () => {
+    writeFixtureSkin('harbor')
+    const server = await serve(makeSkinCenterV2Routes({
+      loadCatalog: () => loadSkinCatalog({ builtinDir: builtin, userDir: join(root, 'user') }),
+      activeStatePath: statePath,
+      shippedSkinIds: () => new Set(['harbor']),
+    }))
+    const res = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/skins/harbor/uninstall`)
+    expect(res.status).toBe(400)
+    expect(res.jsonBody.error).toBe('cannot-uninstall-builtin')
+    await server.close()
+  })
+
+  it('answers 404 when skin to uninstall does not exist', async () => {
+    const server = await serve(makeRoutes())
+    const res = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/skins/nonexistent/uninstall`)
+    expect(res.status).toBe(404)
+    expect(res.jsonBody.error).toBe('skin-not-found')
+    await server.close()
+  })
+
+  it('rejects cross-origin uninstall POST', async () => {
+    const server = await serve(makeRoutes())
+    const res = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/skins/harbor/uninstall`, {
+      headers: { origin: 'https://evil.com' },
+    })
+    expect(res.status).toBe(403)
+    await server.close()
+  })
+})
+
+describe('v2 verify integrity route', () => {
+  it('returns integrity summary for all installed skins', async () => {
+    writeFixtureSkin('harbor')
+    const user = join(root, 'user')
+    mkdirSync(user, { recursive: true })
+    const userDir = join(user, 'user-skin')
+    mkdirSync(userDir, { recursive: true })
+    const manifestText = JSON.stringify({
+      skinManifestVersion: 2,
+      id: 'user-skin',
+      name: 'User Skin',
+      nameEn: 'User Skin',
+      version: '1.0.0',
+      author: 'tester',
+      contributes: { stylesheet: 'skin.css' },
+    })
+    writeFileSync(join(userDir, 'skin.json'), manifestText)
+    writeFileSync(join(userDir, 'skin.css'), ':root { --dsw-alias-bg-base: #111; }')
+    const skinJsonHash = createHash('sha256').update(manifestText).digest('hex')
+    const skinCssHash = createHash('sha256').update(':root { --dsw-alias-bg-base: #111; }').digest('hex')
+    writeFileSync(join(userDir, 'dsh-market.provenance.json'), JSON.stringify({
+      version: 1,
+      source: 'https://dsh-market.com',
+      id: 'user-skin',
+      files: {
+        'skin.json': skinJsonHash,
+        'skin.css': skinCssHash,
+      },
+    }))
+
+    const server = await serve(makeSkinCenterV2Routes({
+      loadCatalog: () => loadSkinCatalog({ builtinDir: builtin, userDir: user }),
+      activeStatePath: statePath,
+      shippedSkinIds: () => new Set(['harbor']),
+    }))
+
+    const res = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/verify`)
+    expect(res.status).toBe(200)
+    expect(res.jsonBody.ok).toBe(true)
+    expect(res.jsonBody.total).toBe(2)
+    expect(res.jsonBody.valid).toBe(2)
+    expect(res.jsonBody.issues).toBe(0)
+    await server.close()
+  })
+
+  it('rejects cross-origin verify POST', async () => {
+    const server = await serve(makeRoutes())
+    const res = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/verify`, {
+      headers: { origin: 'https://evil.com' },
+    })
+    expect(res.status).toBe(403)
+    await server.close()
+  })
+
+  it('automatically repairs tampered user skin during verify', async () => {
+    // Write mirror source for user-skin
+    const mirror = join(root, 'mirror-skin')
+    mkdirSync(mirror, { recursive: true })
+    const manifestText = JSON.stringify({
+      skinManifestVersion: 2,
+      id: 'user-skin',
+      name: 'User Skin',
+      nameEn: 'User Skin',
+      version: '1.0.0',
+      author: 'tester',
+      contributes: { stylesheet: 'skin.css' },
+    })
+    writeFileSync(join(mirror, 'skin.json'), manifestText)
+    writeFileSync(join(mirror, 'skin.css'), ':root { --dsw-alias-bg-base: #fff; }')
+
+    const user = join(root, 'user')
+    mkdirSync(user, { recursive: true })
+    const userDir = join(user, 'user-skin')
+    mkdirSync(userDir, { recursive: true })
+    writeFileSync(join(userDir, 'skin.json'), manifestText)
+    writeFileSync(join(userDir, 'skin.css'), ':root { --dsw-alias-bg-base: #tampered; }')
+    // Provenance with correct hash for pristine, but file is tampered
+    writeFileSync(join(userDir, 'dsh-market.provenance.json'), JSON.stringify({
+      version: 1,
+      source: 'https://dsh-market.com',
+      id: 'user-skin',
+      files: {
+        'skin.json': createHash('sha256').update(manifestText).digest('hex'),
+        'skin.css': createHash('sha256').update(':root { --dsw-alias-bg-base: #fff; }').digest('hex'),
+      },
+    }))
+
+    const server = await serve(makeSkinCenterV2Routes({
+      loadCatalog: () => loadSkinCatalog({ builtinDir: builtin, userDir: user }),
+      activeStatePath: statePath,
+      userDir: user,
+      localSourceDir: mirror,
+    }))
+
+    const res = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/verify`, {
+      body: { autoRepair: true },
+    })
+    expect(res.status).toBe(200)
+    expect(res.jsonBody.ok).toBe(true)
+    expect(res.jsonBody.repaired).toContain('user-skin')
+    expect(res.jsonBody.issues).toBe(0)
+    expect(res.jsonBody.valid).toBe(1)
+
+    // Check disk content
+    expect(readFileSync(join(userDir, 'skin.css'), 'utf8')).toBe(':root { --dsw-alias-bg-base: #fff; }')
+    await server.close()
+  })
+})
+
+describe('v2 single skin repair route', () => {
+  it('repairs a specific user skin via POST /skins/:id/repair', async () => {
+    const mirror = join(root, 'mirror-single')
+    mkdirSync(mirror, { recursive: true })
+    const manifestText = JSON.stringify({
+      skinManifestVersion: 2,
+      id: 'repairable',
+      name: 'Repairable',
+      nameEn: 'Repairable',
+      version: '1.0.0',
+      author: 'tester',
+      contributes: { stylesheet: 'skin.css' },
+    })
+    writeFileSync(join(mirror, 'skin.json'), manifestText)
+    writeFileSync(join(mirror, 'skin.css'), ':root { --dsw-alias-bg-base: #repaired; }')
+
+    const user = join(root, 'user')
+    mkdirSync(user, { recursive: true })
+    const userDir = join(user, 'repairable')
+    mkdirSync(userDir, { recursive: true })
+    writeFileSync(join(userDir, 'skin.json'), manifestText)
+    writeFileSync(join(userDir, 'skin.css'), ':root { --dsw-alias-bg-base: #bad; }')
+
+    const server = await serve(makeSkinCenterV2Routes({
+      loadCatalog: () => loadSkinCatalog({ builtinDir: builtin, userDir: user }),
+      activeStatePath: statePath,
+      userDir: user,
+      localSourceDir: mirror,
+    }))
+
+    const res = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/skins/repairable/repair`)
+    expect(res.status).toBe(200)
+    expect(res.jsonBody.ok).toBe(true)
+    expect(res.jsonBody.id).toBe('repairable')
+    expect(readFileSync(join(userDir, 'skin.css'), 'utf8')).toBe(':root { --dsw-alias-bg-base: #repaired; }')
+    await server.close()
+  })
+
+  it('rejects repairing a builtin skin', async () => {
+    writeFixtureSkin('harbor')
+    const server = await serve(makeSkinCenterV2Routes({
+      loadCatalog: () => loadSkinCatalog({ builtinDir: builtin, userDir: join(root, 'user') }),
+      activeStatePath: statePath,
+      shippedSkinIds: () => new Set(['harbor']),
+    }))
+    const res = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/skins/harbor/repair`)
+    expect(res.status).toBe(400)
+    expect(res.jsonBody.error).toBe('cannot-repair-builtin')
     await server.close()
   })
 })

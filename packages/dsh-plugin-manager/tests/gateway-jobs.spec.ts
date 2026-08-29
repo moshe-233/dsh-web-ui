@@ -205,6 +205,95 @@ describe('CliGateway install verification (B8)', () => {
   })
 })
 
+describe('CliGateway legacy aggregate migration', () => {
+  it('removes legacy, installs current, preserves layer order, and verifies', async () => {
+    const legacy = '@linxin666/dsh-web-ui-all'
+    const current = '@linxin666/dsh-web-all'
+    const { facts, dir } = makeProfile({ [legacy]: { version: '0.3.2', bundle: true } }, { bundles: [legacy, '@omdsh-dev/dsh-annotation'] })
+    tempDirs.push(dir)
+    const calls: string[][] = []
+    const gateway = gatewayFor(facts, (args) => {
+      if (args[0] !== 'plugin') return { code: 0 }
+      if (args[3] === 'add' && args[4] === `${current}@0.3.3`) {
+        installPackage(facts.profileDir, current, { version: '0.3.3', bundle: true })
+      }
+      if (args[3] === 'remove' && args[4] === legacy) removePackage(facts.profileDir, legacy)
+      return { code: 0 }
+    }, calls)
+    const { jobId } = gateway.migrate(legacy, current, '0.3.3', `${current}@0.3.3`)
+    const job = await settle(gateway, jobId)
+
+    expect(job.phase).toBe('done')
+    expect(job.plugin?.id).toBe(current)
+    expect(job.plugin?.version).toBe('0.3.3')
+    expect(readManifest(facts.profileDir).dependencies[legacy]).toBeUndefined()
+    expect(readManifest(facts.profileDir).dependencies[current]).toBe('1.0.0')
+    expect(readManifest(facts.profileDir).dsh.profile.bundles).toEqual([current, '@omdsh-dev/dsh-annotation'])
+    expect(calls.some(args => args[3] === 'remove' && args[4] === legacy)).toBe(true)
+    expect(calls.some(args => args[3] === 'add' && args[4] === `${current}@0.3.3`)).toBe(true)
+  })
+
+  it('does not recreate dual bundles when the current aggregate was already present and verify fails', async () => {
+    const legacy = '@linxin666/dsh-web-ui-all'
+    const current = '@linxin666/dsh-web-all'
+    const { facts, dir } = makeProfile(
+      {
+        [legacy]: { version: '0.3.2', bundle: true },
+        [current]: { version: '0.3.3', bundle: true },
+      },
+      { bundles: [legacy, current, '@omdsh-dev/dsh-annotation'] },
+    )
+    tempDirs.push(dir)
+    const calls: string[][] = []
+    const gateway = gatewayFor(facts, (args) => {
+      if (args[0] === 'plugin' && args[3] === 'remove' && args[4] === legacy) {
+        removePackage(facts.profileDir, legacy)
+        return { code: 0 }
+      }
+      if (args[0] !== 'plugin') return { code: 1, output: 'dump gate failed' }
+      return { code: 0 }
+    }, calls)
+    const { jobId } = gateway.migrate(legacy, current, '0.3.3', `${current}@0.3.3`)
+    const job = await settle(gateway, jobId)
+
+    expect(job.phase).toBe('error')
+    expect(job.error).toContain('迁移后的启动预检失败')
+    const manifest = readManifest(facts.profileDir)
+    expect(manifest.dependencies[legacy]).toBeUndefined()
+    expect(manifest.dependencies[current]).toBe('1.0.0')
+    expect(manifest.dsh.profile.bundles).toEqual([current, '@omdsh-dev/dsh-annotation'])
+    expect(calls.some(args => args[3] === 'add' && args[4] === `${current}@0.3.3`)).toBe(true)
+    expect(calls.some(args => args[3] === 'add' && args[4] === legacy)).toBe(false)
+  })
+
+  it('accepts a local repository link without requiring a registry version match', async () => {
+    const legacy = '@linxin666/dsh-web-ui-all'
+    const current = '@linxin666/dsh-web-all'
+    const { facts, dir } = makeProfile({ [legacy]: { version: '0.3.2', bundle: true } }, { bundles: [legacy, '@omdsh-dev/dsh-annotation'] })
+    tempDirs.push(dir)
+    const targetSpec = 'link:/Users/zcl/code/dsh-web/packages/dsh-web-all'
+    const calls: string[][] = []
+    const gateway = gatewayFor(facts, (args) => {
+      if (args[0] !== 'plugin') return { code: 0 }
+      if (args[3] === 'add' && args[4] === targetSpec) {
+        installPackage(facts.profileDir, current, { version: '0.3.2', bundle: true })
+        return { code: 0 }
+      }
+      if (args[3] === 'remove' && args[4] === legacy) {
+        removePackage(facts.profileDir, legacy)
+        return { code: 0 }
+      }
+      return { code: 0 }
+    }, calls)
+    const { jobId } = gateway.migrate(legacy, current, '0.3.3', targetSpec)
+    const job = await settle(gateway, jobId)
+
+    expect(job.phase).toBe('done')
+    expect(job.plugin?.version).toBe('0.3.2')
+    expect(readManifest(facts.profileDir).dependencies[current]).toBe('1.0.0')
+  })
+})
+
 describe('CliGateway duplicate entry id rollback (B5)', () => {
   it('rolls the new package back and never writes a shared-id disabled row', async () => {
     const { facts, dir } = makeProfile({
@@ -346,9 +435,9 @@ describe('CliGateway duplicate-mount safeguard (B9)', () => {
     // package also sits in dependencies (not in bundles); any CLI mutation
     // re-adds it to bundles and the next boot double-mounts.
     const { facts, dir } = makeProfile({
-      '@linxin666/dsh-web-ui-all': { bundle: true, patch: AGGREGATE_PATCH },
+      '@linxin666/dsh-web-all': { bundle: true, patch: AGGREGATE_PATCH },
       'dsh-better-sidebar': { bundle: true },
-    }, { bundles: ['@linxin666/dsh-web-ui-all'] })
+    }, { bundles: ['@linxin666/dsh-web-all'] })
     tempDirs.push(dir)
     const calls: string[][] = []
     const gateway = gatewayFor(facts, (args) => {
@@ -365,7 +454,7 @@ describe('CliGateway duplicate-mount safeguard (B9)', () => {
     expect(job.plugin?.id).toBe('dsh-memoir')
     const manifest = readManifest(facts.profileDir)
     // The duplicate-mount entry is stripped; everything else is untouched.
-    expect(manifest.dsh.profile.bundles).toEqual(['@linxin666/dsh-web-ui-all', 'dsh-memoir'])
+    expect(manifest.dsh.profile.bundles).toEqual(['@linxin666/dsh-web-all', 'dsh-memoir'])
     expect(manifest.dependencies['dsh-better-sidebar']).toBe('1.0.0')
     // One notice per stripped entry, in the conflict-row shape.
     expect(job.notices).toEqual([{ id: 'dsh-better-sidebar', name: 'dsh-better-sidebar', from: 'enabled', to: 'uninstalled' }])
@@ -418,10 +507,10 @@ describe('CliGateway duplicate-mount safeguard (B9)', () => {
 
   it('a remove job does not resurrect a previously stripped bundles entry', async () => {
     const { facts, dir } = makeProfile({
-      '@linxin666/dsh-web-ui-all': { bundle: true, patch: AGGREGATE_PATCH },
+      '@linxin666/dsh-web-all': { bundle: true, patch: AGGREGATE_PATCH },
       'dsh-better-sidebar': { bundle: true },
       'dsh-memoir': { bundle: true },
-    }, { bundles: ['@linxin666/dsh-web-ui-all', 'dsh-memoir'] })
+    }, { bundles: ['@linxin666/dsh-web-all', 'dsh-memoir'] })
     tempDirs.push(dir)
     const calls: string[][] = []
     const gateway = gatewayFor(facts, (args) => {
@@ -437,7 +526,7 @@ describe('CliGateway duplicate-mount safeguard (B9)', () => {
     expect(job.phase).toBe('done')
     const manifest = readManifest(facts.profileDir)
     // Reconciliation re-added dsh-better-sidebar; the safeguard stripped it again.
-    expect(manifest.dsh.profile.bundles).toEqual(['@linxin666/dsh-web-ui-all'])
+    expect(manifest.dsh.profile.bundles).toEqual(['@linxin666/dsh-web-all'])
     expect(manifest.dependencies['dsh-better-sidebar']).toBe('1.0.0')
     expect(manifest.dependencies['dsh-memoir']).toBeUndefined()
     expect(job.notices).toEqual([{ id: 'dsh-better-sidebar', name: 'dsh-better-sidebar', from: 'enabled', to: 'uninstalled' }])
@@ -479,5 +568,62 @@ describe('CliGateway update verification', () => {
     expect(job.phase).toBe('error')
     expect(job.error).toContain('更新未生效')
     expect(calls[0]).toEqual(['plugin', '--profile', 'web', 'add', 'dsh-memoir@1.1.0'])
+  })
+})
+describe('CliGateway finished-job retention', () => {
+  /** Fill the finished-job ring with `count` settled jobs of one repeated spec. */
+  async function fillRing(gateway: CliGateway, count: number): Promise<void> {
+    for (let index = 0; index < count; index += 1) {
+      const { jobId } = gateway.install('dsh-retention')
+      await settle(gateway, jobId)
+    }
+  }
+
+  it('keeps only the newest 100 finished jobs and evicts the oldest settled one', async () => {
+    const { facts, dir } = makeProfile({})
+    tempDirs.push(dir)
+    const gateway = gatewayFor(facts, (args) => {
+      if (args[0] === 'plugin' && args[3] === 'add') installPackage(facts.profileDir, args[4] ?? '', {})
+      return { code: 0 }
+    }, [])
+    await fillRing(gateway, 101)
+    // The first settled job is evicted as the 101st finishes; the ring keeps
+    // job-2..job-101 and reads the evicted id as not-found.
+    expect(gateway.status('job-1')).toBeUndefined()
+    expect(gateway.status('job-2')).toMatchObject({ id: 'job-2', phase: 'error' })
+    expect(gateway.status('job-101')).toMatchObject({ id: 'job-101', phase: 'error' })
+  })
+
+  it('never evicts in-progress jobs and keeps the ring on the newest finished ones', async () => {
+    const { facts, dir } = makeProfile({})
+    tempDirs.push(dir)
+    const gateway = gatewayFor(facts, (args) => {
+      if (args[0] === 'plugin' && args[3] === 'add') installPackage(facts.profileDir, args[4] ?? '', {})
+      return { code: 0 }
+    }, [])
+    await fillRing(gateway, 101)
+    // Hold the mutation queue so two jobs are in flight while the ring is
+    // already full: they must stay queryable while running.
+    let release!: () => void
+    const blocker = new Promise<void>(resolve => { release = resolve })
+    const direct = gateway.withMutationLock(() => blocker)
+    const hold = gateway.install('dsh-hold')
+    const queued = gateway.install('dsh-queued')
+    expect(gateway.status(hold.jobId)).toMatchObject({ id: hold.jobId, phase: 'running' })
+    expect(gateway.status(queued.jobId)).toMatchObject({ id: queued.jobId, phase: 'running' })
+    release()
+    await direct
+    const holdJob = await settle(gateway, hold.jobId)
+    const queuedJob = await settle(gateway, queued.jobId)
+    expect(holdJob.phase).toBe('done')
+    expect(queuedJob.phase).toBe('done')
+    // The two new finished jobs evict the two oldest finished ones; the jobs
+    // that were in flight settle and stay queryable themselves.
+    expect(gateway.status('job-1')).toBeUndefined()
+    expect(gateway.status('job-2')).toBeUndefined()
+    expect(gateway.status('job-3')).toBeUndefined()
+    expect(gateway.status('job-4')).toBeDefined()
+    expect(gateway.status(hold.jobId)).toMatchObject({ phase: 'done' })
+    expect(gateway.status(queued.jobId)).toMatchObject({ phase: 'done' })
   })
 })

@@ -14,13 +14,18 @@
  * @module @linxin666/dsh-doctor/client
  */
 
-import type { ClientContext, SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+// Type-only: the settings-namespace scope contract types (the ctx.settingsScope
+// merge itself comes from the ui-settings side-effect import below).
+import type { SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-ui-settings/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: pulls the settings-surface Context merge (ctx.settingsScope).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 // Type-only: pulls the SlotMap/LocaleNamespaceMap merge points (web-ui.plugin.item seat).
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
+// Type-only: pulls the ctx.slots merge (the renderer owns the slot registry since 0.1.2).
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 
 import { DoctorApi } from './doctor-api.ts'
 import { DoctorController } from './doctor-controller.ts'
@@ -35,6 +40,7 @@ import {
   type DoctorSettingsCardFace,
 } from './DoctorSettingsCard.tsx'
 import { en, zh, type DoctorKey } from './locales.ts'
+import { reportDailyHeartbeat } from './telemetry.ts'
 
 /** Locale namespace owned by this plugin. */
 export const NS = 'doctor'
@@ -62,7 +68,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
-    /** Optional rc.6 compatibility binder provided by dsh-web-ui-settings. */
+    /** Optional rc.6 compatibility binder provided by dsh-web-settings. */
     webUiSettings?: { bind<S>(spec: SettingsScopeSpec<S>): SettingsScope<S> }
   }
 }
@@ -75,12 +81,22 @@ let claimed = false
 
 /** Apply the browser half; never throws. */
 export function apply(ctx: ClientContext): void {
+  // Anonymous install heartbeat (docs/telemetry.md): one beat per browser per
+  // UTC day, package name only, silent failure.
+  reportDailyHeartbeat([{ name: '@linxin666/dsh-doctor' }])
+
   if (claimed) return
   claimed = true
 
   // Dictionaries.
   safe(() => {
-    ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'doctor: dictionaries')
+    ctx.effect(() => {
+      try {
+        return ctx.locale.register(NS, { zh, en })
+      } catch {
+        return () => {}
+      }
+    }, 'doctor: dictionaries')
   })
 
   // Controller: passive probe + poll loop, both fail-open. Feeds the card's

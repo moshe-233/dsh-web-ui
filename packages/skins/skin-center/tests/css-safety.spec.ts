@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 import { SkinCssSafetyError, transformSkinCss } from '../src/core/css-safety/transform.ts'
+import { auditTokenContract } from '../src/core/css-safety/token-audit.ts'
 
 const ID = 'harbor'
 const SCOPE = 'html[data-dsh-skin="harbor"]'
@@ -292,5 +293,67 @@ describe('transformSkinCss warnings', () => {
   it('warns on generic @keyframes names', () => {
     const { warnings } = scope('@keyframes spin { to { transform: rotate(360deg); } }')
     expect(warnings.some((w) => w.includes('spin'))).toBe(true)
+  })
+})
+
+describe('primary-action derivation (issue #506 follow-up)', () => {
+  const legacy = [
+    ':root {',
+    '  --dsw-alias-brand-primary: #4a5fa8;',
+    '  --dsw-alias-brand-primary-invert: #fff;',
+    '}',
+  ].join('\n')
+  it('completes the set for the legacy matched pair (brand + invert)', () => {
+    const { code } = transformSkinCss(legacy, { skinId: ID, filename: 'skin.css', deriveFallbacks: true })
+    expect(code).toContain('--dsw-alias-button-primary-fill: var(--dsw-alias-brand-primary);')
+    expect(code).toContain('--dsw-alias-button-primary-hover: color-mix(in srgb, var(--dsw-alias-button-primary-fill) 82%, var(--dsw-alias-bg-layer-1));')
+    expect(code).toContain('--dsw-alias-button-primary-dimmed: color-mix(in srgb, var(--dsw-alias-button-primary-fill) 60%, var(--dsw-alias-bg-layer-1));')
+    expect(code).toContain('--dsw-alias-label-primary-foreground: var(--dsw-alias-brand-primary-invert);')
+  })
+  it('derives hover and dimmed from an explicit fill but keeps the shell foreground', () => {
+    const css = ':root { --dsw-alias-button-primary-fill: #2fbf8f; }'
+    const { code } = transformSkinCss(css, { skinId: ID, filename: 'skin.css', deriveFallbacks: true })
+    expect(code).toContain('--dsw-alias-button-primary-hover: color-mix')
+    expect(code).toContain('--dsw-alias-button-primary-dimmed: color-mix')
+    expect(code).not.toContain('--dsw-alias-label-primary-foreground:')
+    expect(code).not.toContain('--dsw-alias-button-primary-fill: var(--dsw-alias-brand-primary);')
+  })
+  it('never overrides a complete set and never derives without an anchor', () => {
+    const complete = [
+      ':root {',
+      '  --dsw-alias-button-primary-fill: #e95c91;',
+      '  --dsw-alias-button-primary-hover: #d64b80;',
+      '  --dsw-alias-label-primary-foreground: #fff;',
+      '}',
+    ].join('\n')
+    const done = transformSkinCss(complete, { skinId: ID, filename: 'skin.css', deriveFallbacks: true })
+    expect(done.code).not.toContain('--dsw-alias-button-primary-hover: color-mix')
+    const none = transformSkinCss('.a { color: red; }', { skinId: ID, filename: 'skin.css', deriveFallbacks: true })
+    expect(none.code).not.toContain('--dsw-alias-button-primary-')
+  })
+})
+
+describe('token audit traversal', () => {
+  it('bounds at-rule recursion to its own block (nested @media chains stay linear)', () => {
+    const nested = [
+      '@media (min-width: 1100px) {',
+      '  @media (max-width: 1099px), (max-height: 680px) {',
+      '    @supports (appearance: base-select) {',
+      '      :root { --dsw-alias-button-primary-fill: #12203a; }',
+      '      @keyframes orca-pulse { 0% { opacity: 0 } to { opacity: 1 } }',
+      '    }',
+      '  }',
+      '  @media (max-width: 420px) { :root { --dsw-alias-button-primary-fill: #101828; } }',
+      '}',
+    ].join('\n')
+    const started = Date.now()
+    const result = auditTokenContract([{ filename: 'patches.css', css: nested }])
+    expect(Date.now() - started).toBeLessThan(1000)
+    // The fill is declared only inside the nested at-rule chain; a traversal
+    // that escapes its block or re-walks the file would either miss the
+    // token (widening the missing-anchor warnings) or never finish.
+    expect(result.warnings.every((warning) => !warning.includes('"button-primary-fill" is not defined')))
+      .toBe(true)
+    expect(result.warnings.every((warning) => !warning.includes('primary action contrast'))).toBe(true)
   })
 })

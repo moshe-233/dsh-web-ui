@@ -7,7 +7,9 @@
  * Export discipline (packages/AGENTS.md): the /client surface carries only
  * what cordis loading needs plus types.
  */
-import type { ClientContext, ISessions } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale) and its
 // LocaleNamespaceMap merge table.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -15,6 +17,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { SessionIdEntry } from './SessionIdEntry.tsx'
 import { en, zh, type SessionIdKey } from './locales.ts'
+import { reportDailyHeartbeat } from './telemetry.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -37,7 +40,17 @@ export const inject = ['slots', 'locale', 'sessions']
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'session-id: dictionaries')
+  // Anonymous install heartbeat (docs/telemetry.md): one beat per browser per
+  // UTC day, package name only, silent failure.
+  reportDailyHeartbeat([{ name: '@linxin666/dsh-client-ui-session-id' }])
+
+  ctx.effect(() => {
+    try {
+      return ctx.locale.register(NS, { zh, en })
+    } catch {
+      return () => {}
+    }
+  }, 'session-id: dictionaries')
 
   // Sidebar foot entry. The shell declares 'sidebar.footer.action' (list kind:
   // multiple occupants may share the seat); registration is declaration-aware
@@ -51,12 +64,16 @@ export function apply(ctx: ClientContext): void {
       getSnapshot: () => sessions.list.getSnapshot(),
       subscribe: (fn: () => void) => sessions.list.subscribe(fn),
     }
-    return ctx.slots.register({
-      name: 'sidebar.footer.action',
-      id: ENTRY_ID,
-      locale: NS,
-      inject: () => ({ list }),
-    }, SessionIdEntry)
+    try {
+      return ctx.slots.register({
+        name: 'sidebar.footer.action',
+        id: ENTRY_ID,
+        locale: NS,
+        inject: () => ({ list }),
+      }, SessionIdEntry)
+    } catch {
+      return () => {}
+    }
   })
 }
 

@@ -1,9 +1,11 @@
-import { spawn } from 'node:child_process'
+import { spawnDsh } from './dsh-process.ts'
 import { randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
-import { delimiter, dirname, resolve } from 'node:path'
+import { delimiter } from 'node:path'
+import { dirname, resolve } from 'node:path/posix'
 import { DOCTOR_PROTOCOL_VERSION, type ProfileIdentity, type SupervisorRequest } from '../core/protocol.ts'
 import { profileIdentity, resolveDshHome } from '../core/profile.ts'
+import { migrateLegacyAggregate } from './migrate.ts'
 import { callSupervisor } from './ipc.ts'
 
 /** Drop a leading program token (`dsh`, `dsh.cmd`, absolute executable path) so helpers work with or without it. */
@@ -48,6 +50,8 @@ export interface ManagedLaunchOptions {
   realDsh?: string
   env?: NodeJS.ProcessEnv
   now?: () => string
+  /** Run the deterministic legacy aggregate migration before starting DSH. */
+  autoMigrate?: boolean
 }
 
 export async function managedLaunch(options: ManagedLaunchOptions): Promise<number> {
@@ -56,8 +60,17 @@ export async function managedLaunch(options: ManagedLaunchOptions): Promise<numb
   const kind = classifyInvocation(options.argv)
   const profileName = parseProfile(options.argv)
   const identity: ProfileIdentity | undefined = profileName === undefined ? undefined : profileIdentity(resolveDshHome(env), profileName, realDsh)
+  if (kind === 'profile' && profileName !== undefined && options.autoMigrate !== false) {
+    try {
+      const migration = await migrateLegacyAggregate(resolveDshHome(env), profileName, realDsh, { env })
+      if (migration.kind === 'migrated') process.stderr.write(`[doctor] ${migration.message}\n`)
+      if (migration.kind === 'error') process.stderr.write(`[doctor] ${migration.message}\n`)
+    } catch (error) {
+      process.stderr.write(`[doctor] legacy aggregate migration failed: ${error instanceof Error ? error.message : String(error)}\n`)
+    }
+  }
   const runId = randomUUID()
-  const child = spawn(realDsh, options.argv, { stdio: ['inherit', 'inherit', 'pipe'], env: { ...env, DSH_DOCTOR_ENDPOINT: options.endpoint, DSH_DOCTOR_TOKEN: options.token, DSH_DOCTOR_RUN_ID: runId, ...(identity ? { DSH_DOCTOR_PROFILE_ID: identity.id } : {}) } })
+  const child = spawnDsh(realDsh, options.argv, { stdio: ['inherit', 'inherit', 'pipe'], env: { ...env, DSH_DOCTOR_ENDPOINT: options.endpoint, DSH_DOCTOR_TOKEN: options.token, DSH_DOCTOR_RUN_ID: runId, ...(identity ? { DSH_DOCTOR_PROFILE_ID: identity.id } : {}) } })
   let tail = ''
   child.stderr?.on('data', (chunk: Buffer) => { process.stderr.write(chunk); tail = (tail + chunk.toString('utf8')).slice(-32_000) })
   if (kind === 'profile' && identity) {

@@ -5,7 +5,7 @@
  */
 import { memo, useCallback, useEffect, useState } from 'react'
 import { selectedTaskOf, type BoardController } from '../../core/controller.ts'
-import { COLUMNS, type TaskRecord } from '../../core/tasks.ts'
+import { COLUMNS, canMoveManually, type TaskRecord } from '../../core/tasks.ts'
 import { t } from '../locales.ts'
 import css from '../board.module.css'
 import { NewTaskModal } from './NewTaskModal.tsx'
@@ -52,9 +52,11 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   return (
     <div className={css.board} data-dsh-taskboard-board="" data-dsh-plugin="task-board">
       <header className={css.boardHeader}>
+        {/* Shared hook: dsh-web-all offsets center-view back controls beside the collapsed mobile sidebar. */}
         <button
           type="button"
           className={`${css.ghostButton} ${css.backButton}`}
+          data-dsh-center-view-back=""
           aria-label={t('board.close')}
           onClick={() => { controller.closeBoard() }}
         >
@@ -122,8 +124,27 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
         ) : (
           COLUMNS.map(column => {
             const tasks = visible.filter(task => task.status === column.status)
+            const isManualDropTarget = column.status === 'backlog' || column.status === 'todo'
             return (
-              <section key={column.status} className={css.column} data-status={column.status} data-dsh-part="column">
+              <section
+                key={column.status}
+                className={css.column}
+                data-status={column.status}
+                data-dsh-part="column"
+                onDragOver={isManualDropTarget ? (event) => {
+                  event.preventDefault()
+                  event.dataTransfer.dropEffect = 'move'
+                } : undefined}
+                onDrop={isManualDropTarget ? (event) => {
+                  event.preventDefault()
+                  const taskId = event.dataTransfer.getData('text/plain')
+                  if (!taskId) return
+                  const dropped = snapshot.tasks.find(t => t.id === taskId)
+                  if (dropped && canMoveManually(dropped.status, column.status) && dropped.status !== column.status) {
+                    controller.moveTask(taskId, column.status)
+                  }
+                } : undefined}
+              >
                 <header className={css.columnHeader}>
                   <span className={css.statusDot} data-status={column.status} aria-hidden="true" />
                   <h3 className={css.columnTitle}>{t(STATUS_KEY[column.status])}</h3>

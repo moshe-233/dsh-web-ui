@@ -28,7 +28,7 @@
   checkout。
 - **共享构建预设**：所有 tsdown 包 import `shared/tsdown.client.ts`，禁止复制到
   包内；tsconfig 分层（solution + host/client 各自 program，参照
-  `dsh-git-graph`/`dsh-aionui-panel`）。
+  `dsh-git-graph`/`dsh-task-board`）。
 - **运行时共享模块**：settings 卡三件套、poll-guard、dsh-home 的事实源在
   `shared/`，包内同名文件是 `scripts/sync-shared.mjs` 生成的同步副本
   （generated 头注释，禁止手改；改 shared 源后重跑同步，test:scripts 含 drift 门禁）。
@@ -37,7 +37,12 @@
   `shared/web-platform.ts`）。跨插件协作走 cordis 服务
   （`ctx.slots` / `ctx.sessions` / `ctx.workspaces`）或 slot，不走 value import。
 - **样式**：CSS Modules（`*.module.css`）经 lightningcss 编译进 bundle；不引入
-  UI 框架样式库。
+  UI 框架样式库。填充主按钮一律用主按钮三件套
+  （`--dsw-alias-button-primary-fill` / `--dsw-alias-button-primary-hover` /
+  `--dsw-alias-label-primary-foreground`，明暗两组），不得把
+  `--dsw-alias-brand-primary` 当填充色（官方主题下它与前景同值，会出现
+  黑底黑字/白底白字），契约见
+  [skins/skin-center/contracts/primary-action-tokens-v1.md](skins/skin-center/contracts/primary-action-tokens-v1.md)。
 
 ## Agent 公告约定（issue #839）
 
@@ -52,10 +57,11 @@
 - 每个包必须有 `vitest run` 可通过的测试（`pnpm test` 全仓门禁）。行为变化必须
   带测试；纯 UI 展示层的冒烟测试可放宽为轻量挂载断言。
 - `tests/` 放测试，测试文件不得依赖 DSH 源码 checkout 的 fixture。
-- 聚合载具包（dsh-web-ui-all / dsh-skins）可无单测，但聚合生成脚本必须有
-  `--check` 一致性门禁（`aggregate.mjs` / `build.mjs` 的 check 模式）。
-- 例外：dsh-aionui-panel 已停止支持——不再保留测试、typecheck 门禁与 e2e 断言
-  （右侧面板由 dsh-better-sidebar 接管），后续版本将从聚合包移除。
+- 聚合载具包（dsh-web-all）可无单测，但聚合生成脚本必须有
+  `--check` 一致性门禁（`aggregate.mjs` 的 check 模式）。
+- 例外：dsh-aionui-panel（旧右侧面板）已彻底移除——包、聚合行、内嵌设置卡与文档
+  引用均已清理；右侧面板由 dsh-better-sidebar 提供（聊天区 mermaid 出图与
+  composer 拖文件插入随包移除，官方管线无对应能力）。
 - 例外：dsh-live-stats（实时令牌估算）已彻底移除——包、测试、门禁与文档引用
   均已清理，不再支持。
 

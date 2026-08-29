@@ -10,11 +10,14 @@
  * Export discipline (packages/client rule): the /client surface carries what
  * cordis loading needs plus types only — all value exports stay internal.
  */
-import type { ClientContext, SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-ui-settings/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: pulls the settings-surface Context merge (ctx.settingsScope).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+// Type-only: pulls the ctx.slots merge (the renderer owns the slot registry since 0.1.2).
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 // Type-only: pulls the LocaleNamespaceMap merge table.
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { SshApi } from './api.ts'
@@ -23,6 +26,7 @@ import { mountPanel } from './mount.tsx'
 import { PanelController } from './panel/controller.ts'
 import type { TerminalFontSource } from './panel/helpers.ts'
 import { mountSidebarEntry } from './sidebar-entry.ts'
+import { reportDailyHeartbeat } from './telemetry.ts'
 
 /** Locale namespace this plugin owns. */
 const NS = 'dsh-ssh'
@@ -39,7 +43,7 @@ interface SshClientSettings {
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /**
-     * Optional rc.6 compatibility binder provided by dsh-web-ui-settings;
+     * Optional rc.6 compatibility binder provided by dsh-web-settings;
      * absent when that group plugin is not installed, so callers fall back to
      * the official settings scope.
      */
@@ -73,7 +77,17 @@ export type { SshKey } from './locales.ts'
  * @param ctx - client root context (locale service).
  */
 export function apply(ctx: ClientContext): void {
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-ssh: dictionaries')
+  // Anonymous install heartbeat (docs/telemetry.md): one beat per browser per
+  // UTC day, package name only, silent failure.
+  reportDailyHeartbeat([{ name: '@linxin666/dsh-ssh' }])
+
+  ctx.effect(() => {
+    try {
+      return ctx.locale.register(NS, { zh, en })
+    } catch {
+      return () => {}
+    }
+  }, 'dsh-ssh: dictionaries')
 
   const controller = new PanelController()
   const api = new SshApi()

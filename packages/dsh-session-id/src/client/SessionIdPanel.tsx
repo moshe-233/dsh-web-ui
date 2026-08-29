@@ -5,11 +5,11 @@
  * useSyncExternalStore, so the panel stays in sync with host list updates and
  * needs no per-session runtime wiring.
  */
-import { useSyncExternalStore, useState } from 'react'
+import { useEffect, useRef, useSyncExternalStore, useState } from 'react'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
-import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import { writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
-import { SessionIdIcon, CheckIcon, CopyIcon, CloseIcon } from './icons.tsx'
+import { CheckIcon, CopyIcon, CloseIcon } from './icons.tsx'
 import { SESSION_ID_PART_COPY, SESSION_ID_PART_PANEL, SESSION_ID_PART_ROW, SESSION_ID_PART_SEARCH, SESSION_ID_PLUGIN_ATTR } from './semantic.ts'
 import css from './session-id.module.css'
 
@@ -55,17 +55,27 @@ function SessionRow({ session, current, t }: {
   t: PropsLocale<'session-id'>['t']
 }) {
   const [status, setStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const idleTimer = useRef<number | undefined>(undefined)
   const active = session.id === current
   const title = session.displayTitle || session.id
 
+  // A pending reset timer belongs to the previous copy; drop it when the row
+  // leaves the DOM so nothing keeps running after unmount.
+  useEffect(() => {
+    return () => { window.clearTimeout(idleTimer.current) }
+  }, [])
+
   const handleCopy = (): void => {
+    // Clear the previous reset before a new write so rapid repeated clicks
+    // never stack timers (only the latest copy reaches the idle reset).
+    window.clearTimeout(idleTimer.current)
     // Copy must be gesture-driven; a failed write surfaces an actionable
     // message instead of silently swallowing the error (no permission
     // requests, no background retry).
     void writeClipboard(session.id).then((ok) => {
       if (ok) {
         setStatus('copied')
-        window.setTimeout(() => { setStatus('idle') }, 1200)
+        idleTimer.current = window.setTimeout(() => { setStatus('idle') }, 1200)
       } else {
         setStatus('failed')
       }

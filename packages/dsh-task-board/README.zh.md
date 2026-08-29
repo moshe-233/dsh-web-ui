@@ -12,6 +12,7 @@
 
 - **任务看板 UI**：新会话按钮下方的侧边栏入口在宽栏显示图标和文字、在折叠 rail 显示图标；看板提供五列布局、搜索、任务详情、归档/恢复、执行历史和执行会话跳转。归档任务除恢复、删除和查看 transcript 外保持只读，恢复前不能手动或定时执行。
 - **Host 权威账本**：任务、计划和执行记录存于 `$DSH_HOME/task-board/ledger-v2.json`；浏览器动作只有经 Host 确认后才成为 UI 状态。
+- **有界执行历史**：每个任务只保留最近 20 条执行记录；新运行开始时截掉最旧的记录，使账本大小与每次写入成本不随任务历史无限增长。
 - **真实执行**：手动运行和定时运行共用 Host runner，新建独立会话、重命名、应用 agent 预设和 `/permission <id>`，再以 queue 模式发送任务 Prompt。
 - **钉子失败即关闭**：工作区缺失、预设缺失或损坏、权限命令被拒绝时，任务 Prompt 不会发送。
 - **Host 调度器**：5 段 cron 支持 `*`、`*/n`、范围、逗号列表、周日 `0/7` 和标准的日期/星期 OR 语义，时间基准为 Host 本地时区。
@@ -22,7 +23,7 @@
 
 ## 架构与协议
 
-- `src/index.ts` 通过官方 `@deepseek-ai/dsh-host-apiproxy` 与 `@deepseek-ai/dsh-host-webserver` SDK 挂载 Host 服务。
+- `src/index.ts` 通过官方 `@deepseek-ai/dsh-api-gateway`、`@deepseek-ai/dsh-workspace` 与 `@deepseek-ai/dsh-host-webserver` SDK 挂载 Host 服务。
 - `src/host-ledger.ts` 串行动作，并用临时文件加原子 rename 持久化 `{ schemaVersion: 2, revision, tasks, scheduler, recentRequests }`。
 - `src/host-service.ts` 负责 cron tick、错过触发跳过、runner 启动、重启对账和电源保护理由。
 - `src/client/host-api.ts` 单次导入旧浏览器数据、提交幂等动作，并把 Host snapshot 当作唯一已确认 UI 状态。
@@ -40,8 +41,8 @@ dsh plugin --profile web add @linxin666/dsh-client-ui-task-board@latest
 本地开发安装：
 
 ```sh
-git clone https://github.com/zhu1090093659/dsh-web-ui.git
-cd dsh-web-ui
+git clone https://github.com/zhu1090093659/dsh-web.git
+cd dsh-web
 pnpm install
 pnpm build
 dsh plugin --profile web add link:$(pwd)/packages/dsh-task-board
@@ -112,3 +113,7 @@ pnpm --filter @linxin666/dsh-client-ui-task-board build
 - Linux 需要 systemd-logind 及允许当前用户取得 idle block lock 的策略；容器、WSL、无 system bus 或非 systemd 系统可能显示 `unsupported` 或 `error`。桌面环境是否把 logind idle lock 与显示器空闲联动属于其自身策略，插件不请求屏保或显示器 inhibitor。
 - 已启用计划会从未来触发点之前持续持锁，因此可能增加电池消耗。
 - Host 执行消耗与普通 DSH agent 会话相同的 API 额度。
+
+## 数据遥测
+
+浏览器半区每个 UTC 日向 dsh-market.com 发送一次匿名安装心跳：仅含一个 localStorage 随机 ID 与本包名，无其他数据。服务端只存储该 ID 的加盐哈希，不存 IP，且只暴露聚合计数。完整契约见 [docs/telemetry.md](../../docs/telemetry.md)。

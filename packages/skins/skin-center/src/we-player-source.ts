@@ -47,6 +47,7 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
   let startTime = performance.now();
   let lastTime = performance.now();
   let textureCache = new Map();
+  let videoTextureCache = new Map();
   let activeParticles = [];
   let mouseX = 0.5, mouseY = 0.5;
   let curRotX = 0, curRotY = 0;
@@ -61,6 +62,7 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     attribute vec3 a_pos;
     attribute vec3 a_norm;
     attribute vec2 a_uv;
+    attribute vec2 a_uv2;
     uniform mat4 u_proj;
     uniform mat4 u_view;
     uniform mat4 u_model;
@@ -74,10 +76,12 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     varying vec3 v_norm;
     varying vec3 v_worldPos;
     varying vec2 v_uv;
+    varying vec2 v_uv2;
     varying vec4 v_uv4;
     varying float v_alpha;
     void main() {
       v_uv = a_uv;
+      v_uv2 = a_uv2;
       v_uv4 = a_uv.xyxy;
       v_alpha = 1.0;
       vec3 pos = a_pos;
@@ -134,6 +138,7 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     varying vec3 v_norm;
     varying vec3 v_worldPos;
     varying vec2 v_uv;
+    varying vec2 v_uv2;
     varying vec4 v_uv4;
     varying float v_alpha;
     uniform sampler2D u_tex;
@@ -167,6 +172,12 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     uniform vec3 u_tint;
     uniform vec3 u_tint2;
     uniform sampler2D u_tex2;
+    uniform sampler2D u_lightmap;
+    uniform int u_hasLightmap;
+    uniform vec3 u_lightPos[4];
+    uniform vec4 u_lightColorRadius[4];
+    uniform int u_lightCount;
+    uniform vec3 u_skyLightColor;
     uniform sampler2D u_reflTex;
     uniform vec2 u_resolution;
     uniform int u_hasReflTex;
@@ -313,11 +324,28 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
       vec3 halfDir = normalize(lightDir + viewDir);
 
       if (u_sceneStd == 1) {
-        // WE standard scene shading (shaders/ricepod.frag): warm key light,
-        // strong planet sky-light from below, engine glow boost, gloss specular.
-        float NdotL = max(dot(norm, lightDir), 0.0);
-        vec3 lighting = NdotL * vec3(1.15, 1.1, 1.0);
-        lighting += max(dot(norm, vec3(0.0, -3.0, 0.0)), 0.0) * vec3(0.4, 0.45, 0.55);
+        // Wallpaper Engine generic.frag: authored point lights, black-capable
+        // ambient/skylight, and the first light attenuated by the baked map.
+        vec3 lighting = u_ambientColor;
+        vec3 specularResult = vec3(0.0);
+        for (int li = 0; li < 4; li++) {
+          if (li < u_lightCount) {
+            vec3 delta = u_lightPos[li] - v_worldPos;
+            float distanceToLight = length(delta);
+            vec3 pointDir = delta / max(distanceToLight, 0.0001);
+            float attenuation = clamp((u_lightColorRadius[li].w - distanceToLight) / u_lightColorRadius[li].w, 0.0, 1.0);
+            vec3 pointColor = u_lightColorRadius[li].rgb;
+            float diffuse = max(dot(norm, pointDir), 0.0) * attenuation * attenuation;
+            vec3 diffuseLight = pointColor * diffuse;
+            if (li == 0 && u_hasLightmap == 1) {
+              diffuseLight *= texture2D(u_lightmap, v_uv2).rgb;
+            }
+            lighting += diffuseLight;
+            vec3 pointHalf = normalize(pointDir + viewDir);
+            specularResult += pointColor * pow(max(dot(norm, pointHalf), 0.0), u_specPower) * u_specStrength * attenuation;
+          }
+        }
+        lighting += max(dot(norm, vec3(0.0, -1.0, 0.0)), 0.0) * u_skyLightColor;
         float boostAmt = 0.0;
         for (int i = 0; i < 4; i++) {
           if (i < u_jetCount) {
@@ -325,9 +353,7 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
           }
         }
         vec3 boost = vec3(3.0, 1.2, 0.2) * boostAmt;
-        float specBase = max(dot(halfDir, norm), 0.0);
-        lighting += pow(specBase, 25.0 + 100.0 * smoothstep(0.3, 0.15, baseColor.r)) * 2.0;
-        gl_FragColor = vec4(baseColor.rgb * (lighting + boost), alpha);
+        gl_FragColor = vec4(baseColor.rgb * (lighting + boost) + specularResult, alpha);
         return;
       }
 
@@ -896,6 +922,55 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     return record;
   }
 
+  function activeTimePeriod(schedule, date) {
+    if (!schedule) return null;
+    const hour = date.getHours() + date.getMinutes() / 60;
+    if (hour >= schedule.morning && hour < schedule.day) return 'morning';
+    if (hour >= schedule.day && hour < schedule.dusk) return 'day';
+    if (hour >= schedule.dusk && hour < schedule.night) return 'dusk';
+    return 'night';
+  }
+
+  function layerEnabledByTime(layer, period) {
+    return !layer.timePeriod || layer.timePeriod === period || (layer.timePeriod === 'manual' && period === null);
+  }
+
+  function loadVideoTexture(layer, enabled) {
+    let record = videoTextureCache.get(layer.videoUrl);
+    if (!record) {
+      const texture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0,0,0,0]));
+      const video = document.createElement('video');
+      // The player iframe is sandboxed without allow-same-origin, so every
+      // texture load is a cross-origin fetch from an opaque origin. Without
+      // CORS mode the video taints the WebGL texture and texImage2D throws a
+      // SecurityError, leaving the canvas blank (the scene-resource route
+      // answers Origin: null with access-control-allow-origin: null).
+      video.crossOrigin = 'anonymous';
+      video.src = layer.videoUrl;
+      video.loop = true;
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = 'auto';
+      record = { texture, video, loaded: false };
+      video.addEventListener('loadeddata', () => { record.loaded = true; });
+      videoTextureCache.set(layer.videoUrl, record);
+    }
+    if (enabled && !isPaused) { void record.video.play().catch(() => {}); }
+    else record.video.pause();
+    if (enabled && record.loaded && record.video.readyState >= 2) {
+      gl.bindTexture(gl.TEXTURE_2D, record.texture);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, record.video);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    }
+    return record;
+  }
+
   // FBO setup for reflection passes
   let fbo = null, fboTex = null, fboWidth = 0, fboHeight = 0;
   function ensureFbo(w, h) {
@@ -1038,12 +1113,16 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     gl.bindBuffer(gl.ARRAY_BUFFER, uvBuf);
     gl.bufferData(gl.ARRAY_BUFFER, b64ToF32(mesh.uvB64), gl.STATIC_DRAW);
 
+    const uv2Buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, uv2Buf);
+    gl.bufferData(gl.ARRAY_BUFFER, b64ToF32(mesh.uv2B64 || mesh.uvB64), gl.STATIC_DRAW);
+
     const idxBuf = gl.createBuffer();
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
     const idx32 = Boolean(mesh.idx32) && uintIndexExt;
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx32 ? b64ToU32(mesh.indicesB64) : b64ToU16(mesh.indicesB64), gl.STATIC_DRAW);
 
-    const gpu = { posBuf, normBuf, uvBuf, idxBuf, iCount: mesh.iCount, idxType: idx32 ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT };
+    const gpu = { posBuf, normBuf, uvBuf, uv2Buf, idxBuf, iCount: mesh.iCount, idxType: idx32 ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT };
     modelGpuCache.set(mesh, gpu);
     return gpu;
   }
@@ -1158,13 +1237,22 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
       updateParticles(dt);
     }
 
-    const width = window.innerWidth;
-    const height = window.innerHeight;
+    // Size the backing store in device pixels: on HiDPI displays a CSS-pixel
+    // canvas is upscaled by the compositor and the wallpaper looks soft
+    // (capped at 2x to bound GPU cost on very high DPR screens).
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const width = Math.max(1, Math.round(window.innerWidth * dpr));
+    const height = Math.max(1, Math.round(window.innerHeight * dpr));
     if (canvas.width !== width || canvas.height !== height) {
       canvas.width = width;
       canvas.height = height;
     }
 
+    // Some WE scenes mark the project as 3D solely because they contain 3D
+    // particle systems while their visual base is still ordinary image layers.
+    // Route those mixed scenes through the 2D compositor and draw the decoded
+    // artwork; the 3D-only branch otherwise clears an opaque canvas and shows
+    // only particles over a gradient.
     if (sceneData.is3D && sceneData.models && sceneData.models.length > 0) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, width, height);
@@ -1176,8 +1264,8 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
 
       const isCarScene = Boolean(sceneData.carBodyColor);
       const aspect = width / height;
-      const cam = sceneData.camera || { eye: [2.18, 1.98, 4.63], center: [0, 0.45, 0], up: [0, 1, 0], fov: 45 };
-      const proj3D = mat4Perspective((cam.fov || 45) * Math.PI / 180, aspect, 0.1, 1000.0);
+      const cam = sceneData.camera || { eye: [2.18, 1.98, 4.63], center: [0, 0.45, 0], up: [0, 1, 0], fov: 50 };
+      const proj3D = mat4Perspective((cam.fov || 50) * Math.PI / 180, aspect, 0.1, 1000.0);
 
       // Camera animation: use scene-specific paths if available, otherwise slow orbit
       const camPaths = sceneData.cameraPaths;
@@ -1252,11 +1340,21 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
           const jp = jetPos[ji] || [0, 0, 0];
           gl.uniform3f(gl.getUniformLocation(prog3D, 'u_jetPos[' + ji + ']'), jp[0], jp[1], jp[2]);
         }
+        const pointLights = sceneData.pointLights || [];
+        gl.uniform1i(gl.getUniformLocation(prog3D, 'u_lightCount'), pointLights.length);
+        for (let li = 0; li < 4; li++) {
+          const light = pointLights[li] || { origin: [0, 0, 0], color: [0, 0, 0], radius: 1 };
+          gl.uniform3f(gl.getUniformLocation(prog3D, 'u_lightPos[' + li + ']'), light.origin[0], light.origin[1], light.origin[2]);
+          gl.uniform4f(gl.getUniformLocation(prog3D, 'u_lightColorRadius[' + li + ']'), light.color[0], light.color[1], light.color[2], light.radius);
+        }
+        const sky = sceneData.skyLightColor || [0, 0, 0];
+        gl.uniform3f(gl.getUniformLocation(prog3D, 'u_skyLightColor'), sky[0], sky[1], sky[2]);
         // Ricepod uses lightDir (-0.577, 0.577, 0.577), car uses (0.577, 0.577, 0.577)
         gl.uniform3f(gl.getUniformLocation(prog3D, 'u_lightDir'), isCarScene ? 0.577 : -0.577, 0.577, 0.577);
         const amb = sceneData.clearColor || [0.1, 0.1, 0.15];
-        // For car scenes use schemecolor as ambient; for others use brighter neutral
-        const ambColor = isCarScene ? amb : [Math.max(amb[0], 0.3), Math.max(amb[1], 0.3), Math.max(amb[2], 0.35)];
+        // Generic scenes must preserve authored black ambient. Artificially
+        // lifting it illuminated distant geometry that WE intentionally hides.
+        const ambColor = isCarScene ? amb : (sceneData.ambientColor || [0, 0, 0]);
         gl.uniform3f(gl.getUniformLocation(prog3D, 'u_ambientColor'), ambColor[0], ambColor[1], ambColor[2]);
         gl.uniform3f(gl.getUniformLocation(prog3D, 'u_paintColor'), bodyCol[0], bodyCol[1], bodyCol[2]);
       }
@@ -1265,9 +1363,11 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
       const locPos = gl.getAttribLocation(prog3D, 'a_pos');
       const locNorm = gl.getAttribLocation(prog3D, 'a_norm');
       const locUv = gl.getAttribLocation(prog3D, 'a_uv');
+      const locUv2 = gl.getAttribLocation(prog3D, 'a_uv2');
       gl.enableVertexAttribArray(locPos);
       gl.enableVertexAttribArray(locNorm);
       gl.enableVertexAttribArray(locUv);
+      gl.enableVertexAttribArray(locUv2);
 
       // Per-submesh specular params (from WE material JSONs)
       const specMap = {
@@ -1331,6 +1431,8 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
         gl.vertexAttribPointer(locNorm, 3, gl.FLOAT, false, 0, 0);
         gl.bindBuffer(gl.ARRAY_BUFFER, gpu.uvBuf);
         gl.vertexAttribPointer(locUv, 2, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, gpu.uv2Buf);
+        gl.vertexAttribPointer(locUv2, 2, gl.FLOAT, false, 0, 0);
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gpu.idxBuf);
 
         gl.uniform1i(gl.getUniformLocation(prog3D, 'u_isDome'), flags.dome ? 1 : 0);
@@ -1356,7 +1458,18 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
         }
         gl.uniform3f(gl.getUniformLocation(prog3D, 'u_tint'), tintCol[0], tintCol[1], tintCol[2]);
         gl.uniform3f(gl.getUniformLocation(prog3D, 'u_tint2'), tint2Col[0], tint2Col[1], tint2Col[2]);
-        // Second pass texture (bg pattern overlay), repeat-wrapped like the bg clouds.
+        gl.uniform1i(gl.getUniformLocation(prog3D, 'u_hasLightmap'), 0);
+        if (mesh.lightmapUrl) {
+          const lightmapRec = loadTexture(mesh.lightmapUrl, false);
+          if (lightmapRec.loaded) {
+            gl.activeTexture(gl.TEXTURE2);
+            gl.bindTexture(gl.TEXTURE_2D, lightmapRec.texture);
+            gl.uniform1i(gl.getUniformLocation(prog3D, 'u_lightmap'), 2);
+            gl.uniform1i(gl.getUniformLocation(prog3D, 'u_hasLightmap'), 1);
+            gl.activeTexture(gl.TEXTURE0);
+          }
+        }
+        // Second pass texture (normal/pattern slot), repeat-wrapped like bg clouds.
         if (mesh.texUrl2) {
           const tex2Rec = loadTexture(mesh.texUrl2, true);
           if (tex2Rec.loaded) {
@@ -1383,7 +1496,7 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
 
         // Load texture for all meshes that have one (including skybox)
         if (mesh.texUrl && !flags.dome && !flags.shadow && !flags.grid) {
-          const texRec = loadTexture(mesh.texUrl, flags.aurora || flags.bg);
+          const texRec = loadTexture(mesh.texUrl, Boolean(mesh.repeatBase || flags.aurora || flags.bg));
           if (texRec.loaded) {
             gl.activeTexture(gl.TEXTURE0);
             gl.bindTexture(gl.TEXTURE_2D, texRec.texture);
@@ -1547,7 +1660,7 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
       // 7. 3D sprites (sun glow billboards) and particle streaks (starfield)
       const sprites3d = sceneData.sprites || [];
       const systems3d = sceneData.particles3d || [];
-      if (sprites3d.length > 0 || systems3d.length > 0) {
+      if (sceneData.models && sceneData.models.length > 0 && (sprites3d.length > 0 || systems3d.length > 0)) {
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE); // additive, texture-alpha shaped
         for (const sp of sprites3d) {
           // View-space offset = camera-facing quad (WE sprite.vert semantics:
@@ -1605,6 +1718,18 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     // Projection matrix mapping scene coords (0..sceneW, 0..sceneH) to clip space (-1..1)
     const proj = mat4Ortho(0, sceneW, 0, sceneH, -1000, 1000);
 
+    // WE serializes scene image objects in painter order: the base is first and
+    // overlays/effect layers follow it. Preserve that order. Reversing it makes
+    // an opaque base layer cover flow/sway shaders and every foreground component,
+    // which presents live scenes as a wrongly cropped static texture.
+    const currentPeriod = activeTimePeriod(sceneData.timeSchedule, new Date());
+    const renderLayers = sceneData.layers.filter((layer) => layerEnabledByTime(layer, currentPeriod));
+    // Pause inactive time-period videos immediately; only the author-selected
+    // morning/day/dusk/night layer may consume decode resources.
+    for (const layer of sceneData.layers) {
+      if (layer.videoUrl) loadVideoTexture(layer, layerEnabledByTime(layer, currentPeriod));
+    }
+
     // Pass 1: Render background and sky layers into FBO for reflections
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.viewport(0, 0, fboWidth, fboHeight);
@@ -1630,9 +1755,9 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     gl.uniform1f(gl.getUniformLocation(progBasic, 'u_power'), 1);
 
     // Render sky & upper layers into FBO
-    for (const layer of sceneData.layers) {
+    for (const layer of renderLayers) {
       if (layer.isGround || layer.isReflection) continue;
-      const texRec = loadTexture(layer.texUrl);
+      const texRec = layer.videoUrl ? loadVideoTexture(layer, true) : loadTexture(layer.texUrl);
       if (!texRec.loaded) continue;
 
       const model = mat4Transform2D(layer.x, layer.y, layer.w, layer.h, layer.angle || 0);
@@ -1655,7 +1780,7 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     gl.clear(gl.COLOR_BUFFER_BIT);
 
     // Render all layers (Sky -> Ground -> Reflection -> Particles)
-    for (const layer of sceneData.layers) {
+    for (const layer of renderLayers) {
       if (layer.isReflection) {
         // Water Reflection Pass
         const maskRec = loadTexture(layer.texUrl);
@@ -1783,8 +1908,8 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
         continue;
       }
 
-      // Standard Layer
-      const texRec = loadTexture(layer.texUrl);
+      // Standard image or embedded-video layer.
+      const texRec = layer.videoUrl ? loadVideoTexture(layer, true) : loadTexture(layer.texUrl);
       if (!texRec.loaded) continue;
 
       gl.useProgram(progBasic);
@@ -1883,8 +2008,10 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
   canvas.addEventListener('webglcontextrestored', () => {
     // WebGL objects are invalid after restoration. Ask the embedding
     // controller to rebuild this isolated renderer instead of drawing with
-    // stale programs/textures.
-    window.parent.postMessage({ type: 'dsh-scene-needs-reload' }, window.location.origin);
+    // stale programs/textures. The player frame is sandboxed without
+    // allow-same-origin, so the embedding page's origin is unknown here;
+    // '*' delivers to the window the event source check identifies.
+    window.parent.postMessage({ type: 'dsh-scene-needs-reload' }, '*');
   });
 
   // Load manifest
@@ -1898,10 +2025,13 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     })
     .catch(err => console.error('Failed to load scene manifest', err));
 
-  // Listen for controller messages; only the embedding parent on the same
-  // origin may steer the player.
+  // Listen for controller messages; only the embedding parent may steer the
+  // player. Origin cannot filter here: the player runs sandboxed without
+  // allow-same-origin, so an origin compare would be browser-dependent and
+  // the parent's messages carry its real origin. Only the identity of the
+  // sender (the exact embedding window) is trustworthy.
   window.addEventListener('message', (ev) => {
-    if (ev.source !== window.parent || ev.origin !== window.location.origin) return;
+    if (ev.source !== window.parent) return;
     const msg = ev.data;
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'dsh-set-fit' && msg.fit) {
@@ -1912,7 +2042,7 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
       if (gl.isContextLost()) {
         const ext = gl.getExtension('WEBGL_lose_context');
         if (ext) ext.restoreContext();
-        else window.parent.postMessage({ type: 'dsh-scene-needs-reload' }, window.location.origin);
+        else window.parent.postMessage({ type: 'dsh-scene-needs-reload' }, '*');
       } else {
         // Force an immediate fresh frame after compositor/theme changes.
         renderFrame(performance.now());

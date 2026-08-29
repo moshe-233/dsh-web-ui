@@ -8,7 +8,8 @@
  */
 
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { SettingsScope, SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { BooleanField, PluginSettingsCard } from './PluginSettingsCard.tsx'
 import { booleanField, CardForm, type CardActions, type CardShell, type FieldState } from './settings-form.ts'
 import { DoctorRecoveryConsole } from './DoctorRecoveryConsole.tsx'
@@ -22,6 +23,8 @@ export interface DoctorSettings {
   fullProtection?: boolean
   /** Allow deterministic repairs to promote after the isolated gates pass. */
   autoRepair?: boolean
+  /** Automatically migrate legacy aggregate packages before starting DSH. */
+  autoMigrate?: boolean
   /** Host heartbeat cadence in milliseconds. */
   heartbeatIntervalMs?: number
 }
@@ -34,6 +37,8 @@ export interface DoctorSettingsCardState extends CardShell {
   fullProtection: FieldState
   /** Auto repair switch. */
   autoRepair: FieldState
+  /** Auto migrate switch. */
+  autoMigrate: FieldState
 }
 
 /** The registration-side face the card slot entry injects. */
@@ -57,6 +62,7 @@ export class DoctorSettingsCardController {
       booleanField('enabled'),
       booleanField('fullProtection'),
       booleanField('autoRepair'),
+      booleanField('autoMigrate'),
     ])
     this.store = this.form.bind(() => this.projection())
   }
@@ -67,6 +73,7 @@ export class DoctorSettingsCardController {
       enabled: this.form.field('enabled'),
       fullProtection: this.form.field('fullProtection'),
       autoRepair: this.form.field('autoRepair'),
+      autoMigrate: this.form.field('autoMigrate'),
     }
   }
 
@@ -129,6 +136,18 @@ export function DoctorSettingsCard(props: DoctorSettingsCardProps) {
         {...state.fullProtection}
         onEdit={(text) => { props.edit('fullProtection', text) }}
         onReset={() => { props.resetField('fullProtection') }}
+      />
+      <BooleanField
+        id="settings-doctor-auto-migrate"
+        label={t('settings.autoMigrate')}
+        hint={t('settings.autoMigrateHint')}
+        inheritLabel={t('settings.inherit')}
+        onLabel={t('settings.on')}
+        offLabel={t('settings.off')}
+        {...fieldProps}
+        {...state.autoMigrate}
+        onEdit={(text) => { props.edit('autoMigrate', text) }}
+        onReset={() => { props.resetField('autoMigrate') }}
       />
       <BooleanField
         id="settings-doctor-auto-repair"

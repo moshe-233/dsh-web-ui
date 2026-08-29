@@ -8,8 +8,10 @@
 
 ## 是什么
 
-- 在侧边栏底部的设置行旁边新增「会话 ID」入口（56px 收起态显示图标，展开态
-  显示带文字的整行按钮）。
+- 在侧边栏底部的设置行旁边新增「会话 ID」入口：收起态与展开态都只显示
+  图标按钮（文字保留为无障碍名称与悬停提示）。
+- 收起态下与遥控/更新入口同列纵向堆叠、对齐轨道中轴；展开态下与其他底部
+  入口同行横排。
 - 点击打开居中面板，列出全部会话：显示标题、完整会话 ID（等宽字体），每行
   一个「复制」按钮；当前会话有标记。
 - 面板顶部有搜索框，按标题或 ID 子串**本地**过滤（只读、不发起 host 查询），
@@ -32,8 +34,8 @@ dsh plugin --profile web add @linxin666/dsh-client-ui-session-id@latest
 ### 从仓库安装（开发调试）
 
 ```sh
-git clone https://github.com/zhu1090093659/dsh-web-ui.git
-cd dsh-web-ui
+git clone https://github.com/zhu1090093659/dsh-web.git
+cd dsh-web
 pnpm install
 pnpm -r build
 dsh plugin --profile web add link:$(pwd)/packages/dsh-session-id
@@ -54,6 +56,10 @@ dsh plugin --profile web add link:$(pwd)/packages/dsh-session-id
 - 需要声明了 `sidebar.footer.action` 席位的 DSH Web 外壳（0.1.0-rc.8 及更新版本）；
   旧版外壳上入口不会渲染。
 - 只读查看器：只展示与复制 ID，不打开或管理会话。
+
+## 数据遥测
+
+浏览器半区每个 UTC 日向 dsh-market.com 发送一次匿名安装心跳：仅含一个 localStorage 随机 ID 与本包名，无其他数据。服务端只存储该 ID 的加盐哈希，不存 IP，且只暴露聚合计数。完整契约见 [docs/telemetry.md](../../docs/telemetry.md)。
 
 ## 许可证
 

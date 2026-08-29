@@ -5,13 +5,14 @@
  * receives the acknowledgement before the process tears down.
  */
 
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { IncomingMessage } from 'node:http'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { LAUNCHER_API } from './protocol.ts'
 import { isLoopbackRequest } from './loopback.ts'
+import { writeJson } from './http.ts'
 
 /** How long the exit request waits after the response is flushed. */
-export const EXIT_DELAY_MS = 80
+export const EXIT_DELAY_MS = 500
 
 export { isLoopbackRequest }
 
@@ -23,13 +24,6 @@ export interface ShutdownRouteDeps {
   requestExit(code: number): void
   /** Schedule the exit after the response; defaults to setTimeout. */
   schedule?: (fn: () => void, ms: number) => unknown
-}
-
-/** One JSON response. */
-function writeJson(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body)
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'referrer-policy': 'no-referrer' })
-  res.end(payload)
 }
 
 /**
@@ -54,7 +48,8 @@ export function makeShutdownRoute(deps: ShutdownRouteDeps): WebRoute {
       }
       writeJson(res, 200, { ok: true })
       // Flush first: the browser must see the acknowledgement before the
-      // process is gone. The beat also lets the response socket drain.
+      // process is gone. Leave enough time for fetch to settle before appExit
+      // disposes the web server and the rest of the plugin tree.
       schedule(() => deps.requestExit(0), EXIT_DELAY_MS)
     },
   }

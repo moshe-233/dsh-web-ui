@@ -17,7 +17,10 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: pulls the settings surface's slot contracts (settings.plugins.tab).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 // Type-only: pulls the client runtime Context merge (ctx.workspaces, ctx.sessions).
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-api-session-controller/client'
+import type {} from '@deepseek-ai/dsh-api-workspace-controller/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import { PluginManagerTab, type PluginManagerTabInjected } from './PluginManagerTab.tsx'
 import { en, zh, type PluginManagerKey } from './locales.ts'
@@ -36,6 +39,7 @@ import {
 } from '../core/protocol.ts'
 import { PLUGIN_MANAGER_SERVICE, type PluginManagerService } from '../core/service.ts'
 import type { ControlChange } from '../core/conflict.ts'
+import { reportDailyHeartbeat } from './telemetry.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -272,7 +276,7 @@ export function createPluginManagerFace(ctx: ClientContext): PluginManagerFace {
    */
   const repairPlugin = async (pluginRoot: string, message: string): Promise<void> => {
     const workspace = await ctx.workspaces.create({ path: pluginRoot })
-    const sessionId = await ctx.workspaces.connectWorkspace(workspace.workspaceId)
+    const sessionId = await ctx.sessions.create({ workspaceId: workspace.workspaceId })
     const binding = ctx.sessions.binding(sessionId)
     if (binding === undefined) throw new Error(`plugin-manager: repair session ${sessionId} is unavailable`)
     const result = await binding.session.prompt([{ type: 'text', text: message }], 'queue')
@@ -337,19 +341,41 @@ export function createPluginManagerFace(ctx: ClientContext): PluginManagerFace {
 
 /** Contribute the family plugin-manager tab and provide the shared face. */
 export function apply(ctx: ClientContext): void {
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'plugin-manager: dictionaries')
+  // Anonymous install heartbeat (docs/telemetry.md): one beat per browser per
+  // UTC day, package name only, silent failure.
+  reportDailyHeartbeat([{ name: '@linxin666/dsh-client-ui-plugin-manager' }])
+
+  ctx.effect(() => {
+    try {
+      return ctx.locale.register(NS, { zh, en })
+    } catch {
+      return () => {}
+    }
+  }, 'plugin-manager: dictionaries')
 
   // Built once: the tab and the 'pluginManager' cordis service share one
   // face, so consumers observe exactly the mutations the tab performs.
   const face = createPluginManagerFace(ctx)
-  ctx.provide(PLUGIN_MANAGER_SERVICE, face)
+  try {
+    if (!ctx.get(PLUGIN_MANAGER_SERVICE)) {
+      ctx.provide(PLUGIN_MANAGER_SERVICE, face)
+    }
+  } catch {
+    // ignore duplicate provide
+  }
 
-  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
-    name: 'settings.plugins.tab',
-    id: 'family-plugins',
-    order: 20,
-    label: () => ctx.locale.bind(NS)('tab'),
-    locale: NS,
-    inject: () => face,
-  }, PluginManagerTab))
+  ctx.slots.inject('settings.plugins.tab', () => {
+    try {
+      return ctx.slots.register({
+        name: 'settings.plugins.tab',
+        id: 'family-plugins',
+        order: 20,
+        label: () => ctx.locale.bind(NS)('tab'),
+        locale: NS,
+        inject: () => face,
+      }, PluginManagerTab)
+    } catch {
+      return () => {}
+    }
+  })
 }

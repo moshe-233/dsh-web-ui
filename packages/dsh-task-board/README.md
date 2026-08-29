@@ -12,6 +12,7 @@ A hot-pluggable DeepSeek Harness (DSH) Web GUI plugin with a Host-authoritative 
 
 - **Task board UI**: a sidebar entry below New Session shows icon and text in the wide sidebar and an icon in the collapsed rail; the board provides five kanban columns, search, task details, archive/restore, execution history, and links to execution transcripts. Archived tasks are read-only except for restore, delete, and transcript viewing, and cannot run manually or on schedule until restored.
 - **Host-authoritative ledger**: tasks, schedules, and execution records live in `$DSH_HOME/task-board/ledger-v2.json`; browser actions become confirmed Host transactions.
+- **Bounded execution history**: each task keeps the most recent 20 execution records; the oldest runs are trimmed when a new run starts, so ledger size and write cost stay bounded regardless of how often a task has run.
 - **Real execution**: manual and scheduled runs use the same Host runner, create a fresh session, rename it, apply the agent preset and `/permission <id>`, then queue the task prompt.
 - **Fail-closed pins**: a missing workspace, missing or broken preset, or rejected permission command fails before the task prompt is sent.
 - **Host scheduler**: 5-field cron supports `*`, `*/n`, ranges, comma lists, Sunday `0/7`, and standard day-of-month/day-of-week OR semantics in the Host local time zone.
@@ -22,7 +23,7 @@ A hot-pluggable DeepSeek Harness (DSH) Web GUI plugin with a Host-authoritative 
 
 ## Architecture and protocol
 
-- `src/index.ts` mounts the Host service through the official `@deepseek-ai/dsh-host-apiproxy` and `@deepseek-ai/dsh-host-webserver` SDKs.
+- `src/index.ts` mounts the Host service through the official `@deepseek-ai/dsh-api-gateway`, `@deepseek-ai/dsh-workspace`, and `@deepseek-ai/dsh-host-webserver` SDKs.
 - `src/host-ledger.ts` serializes actions and persists `{ schemaVersion: 2, revision, tasks, scheduler, recentRequests }` through a temporary file plus atomic rename.
 - `src/host-service.ts` owns cron ticks, missed-trigger skipping, runner launch, restart reconciliation, and power reasons.
 - `src/client/host-api.ts` imports legacy browser data once, submits idempotent actions, and treats Host snapshots as the only confirmed UI state.
@@ -40,8 +41,8 @@ dsh plugin --profile web add @linxin666/dsh-client-ui-task-board@latest
 For local development:
 
 ```sh
-git clone https://github.com/zhu1090093659/dsh-web-ui.git
-cd dsh-web-ui
+git clone https://github.com/zhu1090093659/dsh-web.git
+cd dsh-web
 pnpm install
 pnpm build
 dsh plugin --profile web add link:$(pwd)/packages/dsh-task-board
@@ -112,3 +113,7 @@ Set `DSH_POWER_SMOKE=1` to opt into the native helper smoke test on Windows, mac
 - Linux requires systemd-logind and policy permission for the current user to acquire an idle block lock. Containers, WSL, hosts without a system bus, and non-systemd systems may report `unsupported` or `error`. Whether a desktop also associates a logind idle lock with display idleness is desktop policy; the plugin does not request a screensaver or display inhibitor.
 - Keeping enabled schedules armed may increase battery consumption because protection starts before their future trigger time.
 - Host execution consumes the same API quota as an ordinary DSH agent session.
+
+## Telemetry
+
+The browser half sends one anonymous install heartbeat per UTC day to dsh-market.com: a random localStorage id plus this package's name, nothing else. The server stores only a salted hash of that id, never IP addresses, and exposes aggregate counts only. See [docs/telemetry.md](../../docs/telemetry.md) for the full contract.

@@ -2,11 +2,11 @@
 
 
 English | [中文](README.zh.md)
-> Remote access for phones and computers + one-click updates: pair a phone to use the current dsh web workspace remotely, or pair a computer browser through the same token to run the full Web GUI from another device; the sidebar checks for a newer dsh-web-ui release after it loads and marks the update button when one is available; clicking it updates the family.
+> Remote access for phones and computers + one-click updates: pair a phone to use the current dsh web workspace remotely, or pair a computer browser through the same token to run the full Web GUI from another device; the sidebar checks for a newer dsh-web release after it loads and marks the update button when one is available; clicking it updates the family.
 
 This repository is an external plugin package for DeepSeek Harness (DSH):
 pairing-based remote access for the dsh web GUI on phones and computers, plus
-a one-click self-update for the dsh-web-ui family. It is a single
+a one-click self-update for the dsh-web family. It is a single
 dual-face package — the host half owns pairing tokens, device sessions, the
 `/api/pair` route family, the gated `/remote` desktop channel, and the
 `/api/update` surface; the browser half renders the sidebar-foot entries (the
@@ -53,18 +53,45 @@ that probes and runs the update.
   itself — pairing does not gate `/api` (no plugin can; the fence is the
   SDK's own seam). The posture probe below reports that stance when `/api`
   is reachable without pairing.
+- **Paired model catalog**: authenticated paired devices can use `GET
+  /api/pair/model-catalog`, `POST /api/pair/model-catalog/discover`, and
+  `POST /api/pair/model-catalog/upsert` to inspect and adopt models for an
+  existing active `llm-pi-ai` provider only. The capability fixes the
+  provider settings address internally and cannot create providers or read or
+  change credentials, general settings, endpoints, headers, or arbitrary
+  configuration. The exact routes are served ahead of the connection
+  plugin's `/api` prefix, so a paired LAN or tunnel client may call them
+  directly, and they carry the same Host/Origin trust fence as the sibling
+  `/api/pair` endpoints: loopback, the advertised LAN literals, or the
+  configured public base URL. Through the `/remote` desktop channel all
+  `/api/pair/*` paths stay loopback-only. Adoption is refused while the
+  provider's live model catalog is unavailable or unknown. A provider whose
+  resolved `models` list is absent or empty keeps inheriting its installed
+  catalog until an unknown custom model must materialize that catalog;
+  existing model overrides are preserved and translated into the resulting
+  entries. Malformed or conflicting model profiles are refused instead of
+  being destructively rewritten. Stop or device
+  revocation disables it immediately; the
+  generic `settings.*`, `credentials.*`, and `llm.discoverModels` RPC methods
+  remain loopback-only.
 - **Remote desktop channel**: with `requirePairingForLan` on (default), a
   desktop Web GUI opened at the LAN URL or through the tunnel transparently
-  rides `/remote` — the same UI, gated by the same pairing cookie. Browser
+  rides `/remote` — the same UI, gated by the same pairing cookie. The
+  rewrite installs twice-removed from the race it fixes: the host inlines a
+  small classic script right after the opening `<head>` tag
+  (`webserver/index-inject`), so fetch/WebSocket/EventSource and resource
+  `src` rewrites are active before any boot entry (the connection plugin
+  opens its event streams first); the browser half then adopts the installed
+  seat instead of patching twice. Loopback origins skip the patch entirely. Browser
   requests under `/api`, `/sidebar`, `/git`, and `/pet`, including the known
   event, terminal, and SSH WebSockets, are re-issued to the local web server
   without forwarding the remote Origin or pairing cookie; the authenticated
   proxy supplies its own same-origin browser marker for sibling route fences. The
   SDK's loopback-only privileged methods (native dialogs, the settings and
-  credentials plane) stay unreachable from a paired remote desktop, and the
-  `/api/pair/*`, `/api/update/*`, `/api/plugin-manager/*`,
-  `/api/dsh-desktop-launcher/*` and `/api/dsh-web-ui-settings/*` control
-  endpoints stay loopback-only. Unpaired desktop browsers get a persistent
+  credentials plane) stay unreachable from a paired remote desktop;
+  `/api/pair/*` (including the paired model-catalog routes),
+  `/api/update/*`, `/api/plugin-manager/*`, `/api/dsh-desktop-launcher/*`
+  and `/api/dsh-web-ui-settings/*` control endpoints stay loopback-only. Unpaired desktop browsers get a persistent
   full-page block instead of data (the page keys off the `unpaired` error
   code, not every 403). The block retires once a gated call succeeds or the
   channel itself is torn down — turning `requirePairingForLan` off (or the
@@ -89,8 +116,10 @@ that probes and runs the update.
   `@linxin666/dsh-*` family releases. Without the aggregate package, checks and
   updates cover every registry-managed direct `@linxin666/*` dependency in the
   profile; local link/file development dependencies are skipped. When a newer
-  release exists, the panel shows the version comparison and waits for
-  confirmation — clicking "Update now" runs the update (`pnpm update --latest` inside the
+  release exists, the panel shows the GitHub release notes grouped into New
+  Features / Bug Fixes / Other Changes and waits for confirmation; the exact
+  component-version list remains available in a collapsed section. Clicking
+  "Update now" runs the update (`pnpm update --latest` inside the
   owning dsh profile; when pnpm is missing it falls back to `corepack pnpm`
   and then `npx --yes pnpm`, and on Windows the command runs through
   `cmd.exe` so npm-installed `.cmd` shims resolve; the loopback-only
@@ -144,15 +173,15 @@ sun/moon toggle in every header flips to the dark palette at any time.
 
 ## Install
 
-Install the family aggregate package `@linxin666/dsh-web-ui-all` (all plugins and skins in one) or this plugin alone:
+Install the family aggregate package `@linxin666/dsh-web-all` (all plugins and skins in one) or this plugin alone:
 
 ```sh
 # Recommended: install directly from npm
 dsh plugin --profile web add @linxin666/dsh-remote-web-ui@latest
 
 # Or from the repository (development loop)
-git clone https://github.com/zhu1090093659/dsh-web-ui.git
-cd dsh-web-ui
+git clone https://github.com/zhu1090093659/dsh-web.git
+cd dsh-web
 pnpm install && pnpm -r build
 dsh plugin --profile web add link:$(pwd)/packages/dsh-remote-web-ui
 
@@ -223,9 +252,18 @@ need **no harness source changes** — the phone's RPC calls ride the
 plugin's `/m/api` proxy (which delegates to the host ApiProxy service and
 pages `session.list` itself), so the tunneled Host never has to enter the
 connection plugin's trust fence. The phone is gated by its paired-device
-cookie and an explicit method allowlist (settings/credentials/host-action
-domains are never reachable from the phone; model reads/writes are limited
-to the advisory `session.models` / `session.selectModel` pair, agent preset
+cookie and an explicit method allowlist. The allowlist constrains the
+`/m/api` proxy alone: the paired-device cookie itself also passes the global
+api/gate, so a paired device is a full-control credential for the host `/api`
+surface — settings/credentials/host-action domains stay unreachable only
+because the SDK pins those privileged methods to loopback. Pairing is full
+device trust; the `/m/api` proxy's model
+reads/writes are limited to the advisory `session.models` /
+`session.selectModel` pair, and session control is limited to
+`session.cancel` (stops the active turn while preserving pending queued
+work — the phone has no queue management). Separately, the exact paired-only model-catalog
+routes may adopt models for an existing eligible `llm-pi-ai` provider; they
+cannot create providers or access credentials or general settings. Agent preset
 access to read-only `agentPreset.list`, creation to `session.create`
 (workspace id plus an optional id from that roster — the phone never names a
 working directory of its own), and the permission picker only ever sends the
@@ -235,6 +273,12 @@ over Server-Sent Events on `/m/api/events.mux`. The canonical `/m/` page owns a 
 
 ### Behavior notes
 
+- While a turn runs (between its turn/start and turn/end frames), the
+  composer's primary button switches from 发送 to a stop button — the same
+  Send/Stop switch as the desktop input bar. Tapping it calls
+  `session.cancel` to stop the active turn (pending queued prompts resume
+  afterwards); the button is disabled while the stop request is in flight
+  and flips back to 发送 when the turn ends.
 - The mobile composer sends on Enter by default (Shift+Enter inserts a
   newline). Set `mobileEnterToSend: false` in the plugin settings card (or
   the profile patch) to make plain Enter insert a newline instead; sending
@@ -256,7 +300,7 @@ over Server-Sent Events on `/m/api/events.mux`. The canonical `/m/` page owns a 
   SDK's: on a `--host 0.0.0.0` bind the SDK auto-trusts LAN literals, so a
   LAN client bypassing the UI can still reach `/api` directly — the posture
   probe reports that stance on the panel.
-- Sibling host routes outside `/api` (`/pet/*`, `/git/*`, the right-panel `/aionui-panel/*`
+- Sibling host routes outside `/api` (`/pet/*`, `/git/*`, the right-panel `/sidebar/*`
   family) can consult this plugin's `remoteWebUiPairing` service: a live
   paired-device cookie is an allow path, `stop()` still cuts them off, and
   the service is absent when this plugin is not installed.
@@ -458,6 +502,10 @@ accept → UI. Only `publicBaseUrl` (plugin config) names the tunneled host;
 `--trusted-host` is not part of this pairing flow. The desktop panel still
 opens at `http://127.0.0.1`.
 
+## Security model
+
+- Mobile unary routes and the mux event stream require a live paired-device session. A missing or revoked session receives HTTP 403 with a JSON rejection carrying `error.code: "unpaired"`; the browser's `EventSource` API exposes only the stream failure, not that response body.
+
 ## Known Limitations and Deferred Work
 
 - **Revocation is per-request**: a paired phone whose request is already in
@@ -500,3 +548,7 @@ generation. It is inlined into the client bundle at build time (like the
 official skin/turtle-ui plugins inline their non-shared deps), so profile
 installations need no extra runtime dependency beyond the dsh peer closure.
 `schemastery` is the DSH-standard config schema validator.
+
+## Telemetry
+
+The browser half sends one anonymous install heartbeat per UTC day to dsh-market.com: a random localStorage id plus this package's name, nothing else. The server stores only a salted hash of that id, never IP addresses, and exposes aggregate counts only. See [docs/telemetry.md](../../docs/telemetry.md) for the full contract.

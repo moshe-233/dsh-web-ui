@@ -15,9 +15,11 @@ import z from 'schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { makeSkinCenterV2Routes } from './routes-v2.ts'
 import { makeSkinIndexRows, makeSkinIndexTap } from './tap-index-adapter.ts'
-import { defaultActiveStatePath, readActiveSelection } from './active-state.ts'
+import { defaultActiveStatePath, readActiveSelection, seedDefaultActiveSkin } from './active-state.ts'
+import { migrateBackgroundFromSettings } from './background-migration.ts'
 import { migrateLegacySelection } from './legacy-bridge.ts'
-import { loadSkinCatalog } from './skin-repo.ts'
+import { SKIN_BACKGROUND_DEFAULTS, type SkinBackgroundConfig } from './core/background.ts'
+import { findSkin, loadSkinCatalog } from './skin-repo.ts'
 import { makeWeRoutes } from './we-routes.ts'
 import { defaultWallpapersStoreDir } from './we-library.ts'
 import { resolveHarnessHome } from './harness-home.ts'
@@ -36,7 +38,9 @@ export { makeWeRoutes, WE_API_PREFIX } from './we-routes.ts'
 export { validateSkinManifestV2 } from './core/manifest-v2/validate.ts'
 export type { SkinManifestV2, SkinManifestValidation } from './core/manifest-v2/types.ts'
 export { transformSkinCss, SkinCssSafetyError } from './core/css-safety/transform.ts'
-export { loadSkinCatalog, findSkin, resolveInsideSkin, userSkinsDir, builtinSkinsDir } from './skin-repo.ts'
+export { auditTokenContract } from './core/css-safety/token-audit.ts'
+export type { TokenAuditStylesheet, TokenAuditResult } from './core/css-safety/token-audit.ts'
+export { loadSkinCatalog, findSkin, resolveInsideSkin, userSkinsDir, builtinSkinsDir, canServeSkinHooks } from './skin-repo.ts'
 export type { SkinCatalog, SkinCatalogEntry } from './skin-repo.ts'
 export { defaultActiveStatePath, readActiveSelection, writeActiveSelection } from './active-state.ts'
 
@@ -78,49 +82,22 @@ export const SkinCustomThemeConfigSchema: z<SkinCustomThemeConfig> = z.object({
   }).default(CUSTOM_THEME_DEFAULTS.dark),
 })
 
-/**
- * Plugin-configuration fields for the main-interface background, plus the
- * master switch that turns the whole skin center on or off.
- */
-export interface SkinBackgroundConfig {
-  /** Master switch for the skin center. */
-  enabled?: boolean
-  /**
-   * Background occlusion 0-100 (0 = no extra veil, 100 = fully obscured).
-   * Skins that paint a backdrop image (blue-fantasy / whale-song) read the
-   * equivalent CSS variable value and raise their scrim; the official stock
-   * look has no backdrop and is unaffected.
-   */
-  backgroundOpacity?: number
-  /**
-   * Gaussian blur (px, 0-20) applied to the backdrop while the conversation
-   * pane has no content (empty state). Painted only by skins that draw a
-   * backdrop; 0 disables the empty-state blur.
-   */
-  backgroundBlurEmpty?: number
-  /**
-   * Gaussian blur (px, 0-20) applied to the backdrop once the conversation
-   * pane has content. Painted only by skins that draw a backdrop; 0 disables
-   * the with-content blur.
-   */
-  backgroundBlurContent?: number
-  /** Backdrop blur on the composer card while backdrop art is visible. */
-  inputCardBlur?: number
-  /** Message bubble opacity 0-100, consumed by skins that expose bubble alpha. */
-  bubbleOpacity?: number
-}
+// The preference set the card edits now persists in the v2 active-state
+// document (issue #996); the shared contract lives in core/background.ts and
+// is re-exported here for the public API.
+export type { SkinBackgroundConfig } from './core/background.ts'
 
 /**
  * Runtime schema for SkinBackgroundConfig. Persists the master switch
  * (`enabled`) alongside the background strength fields.
  */
 export const SkinBackgroundConfigSchema: z<SkinBackgroundConfig> = z.object({
-  enabled: z.boolean().default(true),
-  backgroundOpacity: z.number().min(0).max(100).step(5).default(0),
-  backgroundBlurEmpty: z.number().min(0).max(20).step(1).default(0),
-  backgroundBlurContent: z.number().min(0).max(20).step(1).default(0),
-  inputCardBlur: z.number().min(0).max(20).step(1).default(10),
-  bubbleOpacity: z.number().min(0).max(100).step(5).default(50),
+  enabled: z.boolean().default(SKIN_BACKGROUND_DEFAULTS.enabled),
+  backgroundOpacity: z.number().min(0).max(100).step(5).default(SKIN_BACKGROUND_DEFAULTS.backgroundOpacity),
+  backgroundBlurEmpty: z.number().min(0).max(20).step(1).default(SKIN_BACKGROUND_DEFAULTS.backgroundBlurEmpty),
+  backgroundBlurContent: z.number().min(0).max(20).step(1).default(SKIN_BACKGROUND_DEFAULTS.backgroundBlurContent),
+  inputCardBlur: z.number().min(0).max(20).step(1).default(SKIN_BACKGROUND_DEFAULTS.inputCardBlur),
+  bubbleOpacity: z.number().min(0).max(100).step(5).default(SKIN_BACKGROUND_DEFAULTS.bubbleOpacity),
 })
 
 /**
@@ -151,6 +128,8 @@ export interface SkinWallpaperConfig {
   dim?: number
   /** Blur radius applied to the wallpaper itself, 0-60 px. */
   wallpaperBlur?: number
+  /** Opacity of the wallpaper media layer itself, 0-100 percent. */
+  wallpaperOpacity?: number
   /** Sizing mode for live wallpapers: cover | contain | fill (stretch). */
   fit?: 'cover' | 'contain' | 'fill'
 }
@@ -164,6 +143,7 @@ export const SkinWallpaperConfigSchema: z<SkinWallpaperConfig> = z.object({
   pauseOnHidden: z.boolean().default(true),
   dim: z.number().min(0).max(90).step(5).default(25),
   wallpaperBlur: z.number().min(0).max(60).step(1).default(0),
+  wallpaperOpacity: z.number().min(0).max(100).step(5).default(100),
   fit: z.union(['cover', 'contain', 'fill'] as const).default('cover'),
 })
 
@@ -184,8 +164,23 @@ function applyImpl(ctx: Context): void {
   // re-resolves across reloads. installSettingsSection is a no-op when no
   // settings service is mounted (pure skin-center installs skip it).
   installSettingsSection(ctx, SKIN_BACKGROUND_NAMESPACE, SkinBackgroundConfigSchema, {}, {
-    setSource: () => { /* application is browser-side; value is read from the scope */ },
-    onChange: () => { /* browser half re-applies on scope publish */ },
+    setSource: (source) => {
+      // Issue #996: the authoritative store is now the v2 active-state
+      // document (reachable through the remote pairing channel); this legacy
+      // namespace stays as the official settings page's input face. Copy a
+      // customized legacy section into the v2 store exactly once — safe at
+      // detach too, since the entry fallback resolves to schema defaults,
+      // which hasCustomSkinBackground excludes.
+      const migration = migrateBackgroundFromSettings({
+        activeStatePath: defaultActiveStatePath(),
+        readSettings: source,
+      })
+      for (const note of migration.notes) {
+        if (migration.migrated) console.info(`[ui-skin-center] background migration: ${note}`)
+        else console.error(`[ui-skin-center] background migration: ${note}`)
+      }
+    },
+    onChange: () => { /* browser half re-applies on scope publish and persists via the v2 channel */ },
   })
 
   installSettingsSection(ctx, SKIN_CUSTOM_THEME_NAMESPACE, SkinCustomThemeConfigSchema, {
@@ -237,6 +232,19 @@ function applyImpl(ctx: Context): void {
     }, 'ui-skin-center: routes')
   } catch (error) {
     console.error('[ui-skin-center] route registration failed:', error)
+  }
+
+  // Default-skin seed (market on-demand plan): only blue-fantasy ships in
+  // the package; every other skin is a market install into the user skins
+  // directory. A first boot with no persisted selection activates the shipped
+  // default once, so fresh installs see the intended look without the user
+  // opening the skin center. Existing selections are never overwritten; a
+  // selection no longer in the catalog resolves to the stock look browser-side.
+  try {
+    const statePath = defaultActiveStatePath()
+    seedDefaultActiveSkin(statePath, (id) => findSkin(loadSkinCatalog(), id) !== null)
+  } catch (error) {
+    console.error('[ui-skin-center] default-skin seed failed:', error)
   }
 
   // One-shot legacy bridge (issue #506): migrate the retired dsh-skin

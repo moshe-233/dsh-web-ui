@@ -26,6 +26,14 @@ export interface ProfileFacts {
   desktop?: boolean
 }
 
+/**
+ * Strip a leading UTF-8 byte order mark (U+FEFF), which commonly appears in
+ * files edited or created on Windows (PowerShell / Notepad).
+ */
+export function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text
+}
+
 /** Read the packaged desktop app's persisted active profile, when present. */
 export function desktopSelectedProfile(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const explicit = env.DSH_DESKTOP_DEFAULT_PROFILE?.trim()
@@ -38,7 +46,7 @@ export function desktopSelectedProfile(env: NodeJS.ProcessEnv = process.env): st
   ].filter((value): value is string => typeof value === 'string')
   for (const root of appRoots) {
     try {
-      const parsed = JSON.parse(readFileSync(join(root, 'profile-selection', 'state.json'), 'utf8')) as { active?: unknown }
+      const parsed = JSON.parse(stripBom(readFileSync(join(root, 'profile-selection', 'state.json'), 'utf8'))) as { active?: unknown }
       if (typeof parsed.active === 'string' && parsed.active.trim() !== '') return parsed.active.trim()
     } catch {
       // Missing or malformed desktop state: try the next platform location.
@@ -106,7 +114,7 @@ export interface ProfileManifest {
  */
 export async function readProfileManifest(packageJsonPath: string): Promise<ProfileManifest> {
   const text = await readFile(packageJsonPath, 'utf8')
-  const parsed = JSON.parse(text) as {
+  const parsed = JSON.parse(stripBom(text)) as {
     dsh?: { profile?: { bundles?: unknown } }
     dependencies?: unknown
   }
@@ -134,12 +142,38 @@ export async function readProfileManifest(packageJsonPath: string): Promise<Prof
  */
 export async function stripProfileBundles(packageJsonPath: string, names: readonly string[]): Promise<void> {
   const text = await readFile(packageJsonPath, 'utf8')
-  const parsed = JSON.parse(text) as { dsh?: { profile?: { bundles?: unknown } } }
+  const parsed = JSON.parse(stripBom(text)) as { dsh?: { profile?: { bundles?: unknown } } }
   const profile = parsed.dsh?.profile
   if (profile === undefined || !Array.isArray(profile.bundles)) return
   profile.bundles = profile.bundles.filter(entry => !(typeof entry === 'string' && names.includes(entry)))
   await copyFile(packageJsonPath, `${packageJsonPath}.bak-plugin-manager`).catch(() => {})
   await writeFile(`${packageJsonPath}.tmp`, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600 })
+  await rename(`${packageJsonPath}.tmp`, packageJsonPath)
+}
+
+/**
+ * Move one bundle entry to a position in `dsh.profile.bundles`, preserving
+ * every unrelated entry. The plugin-manager migration uses this to keep the
+ * renamed aggregate at the same layer position it occupied before the
+ * remove/update cycle instead of leaving the CLI append at the end.
+ * @param packageJsonPath - absolute path of the profile manifest.
+ * @param name - bundle entry to move.
+ * @param index - desired zero-based position.
+ */
+export async function reorderProfileBundle(packageJsonPath: string, name: string, index: number): Promise<void> {
+  const text = await readFile(packageJsonPath, 'utf8')
+  const parsed = JSON.parse(stripBom(text)) as { dsh?: { profile?: { bundles?: unknown } } }
+  const profile = parsed.dsh?.profile
+  if (profile === undefined || !Array.isArray(profile.bundles)) return
+  const bundles = profile.bundles.filter((entry): entry is string => typeof entry === 'string')
+  const current = bundles.indexOf(name)
+  if (current >= 0) bundles.splice(current, 1)
+  const target = Math.max(0, Math.min(index, bundles.length))
+  bundles.splice(target, 0, name)
+  profile.bundles = bundles
+  await copyFile(packageJsonPath, `${packageJsonPath}.bak-plugin-manager`).catch(() => {})
+  await writeFile(`${packageJsonPath}.tmp`, `${JSON.stringify(parsed, null, 2)}
+`, { mode: 0o600 })
   await rename(`${packageJsonPath}.tmp`, packageJsonPath)
 }
 
@@ -150,7 +184,8 @@ export async function stripProfileBundles(packageJsonPath: string, names: readon
  */
 export async function readPatchText(patchPath: string): Promise<string> {
   try {
-    return await readFile(patchPath, 'utf8')
+    const text = await readFile(patchPath, 'utf8')
+    return stripBom(text)
   } catch (error: unknown) {
     if ((error as NodeJS.ErrnoException | null)?.code === 'ENOENT') return '[]\n'
     throw error

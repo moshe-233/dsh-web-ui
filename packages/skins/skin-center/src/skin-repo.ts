@@ -17,16 +17,32 @@
  * The catalog is an immutable snapshot: callers keep the object they got and
  * an activation never sees the catalog change underneath it (contract
  * section 8, "catalog immutable snapshot per activation").
+ *
+ * Scans are memoized per (builtinDir, userDir): a snapshot is reused until a
+ * cheap fingerprint of both roots (skin-dir names plus skin.json stat)
+ * changes, so client requests never rescan the same sources. The fingerprint
+ * covers add/remove/change of any skin directory, while writes outside the
+ * sources (POST /active state) never invalidate it.
  * @module @linxin666/dsh-client-ui-skin-center/skin-repo
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { dirname, join, resolve as resolvePath, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { validateSkinManifestV2 } from './core/manifest-v2/validate.ts'
 import type { SkinManifestV2 } from './core/manifest-v2/types.ts'
+import { auditTokenContract, type TokenAuditStylesheet } from './core/css-safety/token-audit.ts'
 import { resolveHarnessHome } from './harness-home.ts'
+import {
+  repairSkinFromMarket,
+  verifyMarketProvenance,
+  verifyReviewedLegacyHooks,
+  verifySkinIntegrity,
+  type SkinIntegrityReport,
+  type SkinRepairOptions,
+  type SkinRepairResult,
+} from './provenance.ts'
 
 export type SkinOrigin = 'builtin' | 'user'
 
@@ -38,6 +54,13 @@ export interface SkinCatalogEntry {
   dir: string
   /** Non-fatal notes (deprecated v1 fields ignored, shadowing, etc). */
   warnings: string[]
+  /**
+   * True when a user-directory skin's declared hooks identity matched
+   * official-market provenance or the generated reviewed legacy identity at
+   * snapshot time. The HTTP serving gate re-verifies current bytes. Built-in
+   * skins are trusted by origin and never carry this flag.
+   */
+  hooksTrusted?: boolean
 }
 
 export interface SkinCatalogDiagnostic {
@@ -45,6 +68,18 @@ export interface SkinCatalogDiagnostic {
   subject: string
   origin: SkinOrigin
   errors: string[]
+}
+
+/** Read the manifest-referenced stylesheets for one skin directory. */
+function stylesheetEntries(manifest: SkinManifestV2, dir: string): TokenAuditStylesheet[] {
+  const entries: TokenAuditStylesheet[] = []
+  const rels = [manifest.contributes.stylesheet, manifest.contributes.patches ?? null]
+  for (const rel of rels) {
+    if (!rel) continue
+    const abs = join(dir, rel)
+    if (existsSync(abs)) entries.push({ filename: rel, css: readFileSync(abs, 'utf8') })
+  }
+  return entries
 }
 
 export interface SkinCatalog {
@@ -58,6 +93,30 @@ export interface SkinCatalog {
 export function builtinSkinsDir(fromUrl: string = import.meta.url): string {
   // src/skin-repo.ts -> package root is one level up from src/.
   return join(dirname(fileURLToPath(fromUrl)), '..', 'skins')
+}
+
+/**
+ * Shipped builtin skin ids: the npm package.json files whitelist entries
+ * under `skins/` (the "<id>/" directory name). The published package
+ * contains only these directories, so a builtin catalog directory outside
+ * the set is a repository catalog source rather than an installed skin —
+ * the settings catalog lists shipped builtins plus user dirs and leaves
+ * the rest to the market store.
+ */
+export function shippedSkinIds(fromUrl: string = import.meta.url): Set<string> {
+  try {
+    const pkgPath = join(dirname(fileURLToPath(fromUrl)), '..', 'package.json')
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { files?: unknown }
+    const ids = new Set<string>()
+    for (const f of Array.isArray(pkg.files) ? pkg.files : []) {
+      if (typeof f !== 'string' || !f.startsWith('skins/')) continue
+      const id = f.slice('skins/'.length).split('/')[0]
+      if (id !== undefined && id !== '' && id !== '.') ids.add(id)
+    }
+    return ids
+  } catch {
+    return new Set<string>()
+  }
 }
 
 /** User skins live in $DSH_HOME/skins with explicit directory overrides. */
@@ -82,6 +141,33 @@ function readManifest(dir: string): unknown | null {
 interface SourceSpec {
   origin: SkinOrigin
   root: string
+}
+
+/**
+ * Hooks trust for one user-directory skin: official-market installs whose
+ * skin.json and hooks entry hash-match recorded provenance run their hooks.
+ * Historical Workshop installs from before provenance existed recover only
+ * when both files match this release's generated reviewed identity. Anything
+ * else keeps the refusal warning. Built-in skins never reach this — their
+ * origin is the trust signal.
+ */
+function marketHooksTrust(manifest: SkinManifestV2, dir: string): { trusted: boolean; warning: string | null } {
+  const facet = manifest.facets?.client
+  if (!facet) return { trusted: false, warning: null }
+  if (verifyMarketProvenance(dir, manifest.id, facet.entry)
+    || verifyReviewedLegacyHooks(dir, manifest.id, facet.entry)) {
+    return { trusted: true, warning: null }
+  }
+  return {
+    trusted: false,
+    warning: 'declares hooks.mjs, but hooks only run for built-in or byte-verified official-market (same-review) skins; the hooks facet will be refused',
+  }
+}
+
+/** Re-evaluate the executable trust gate against the current on-disk bytes. */
+export function canServeSkinHooks(entry: SkinCatalogEntry): boolean {
+  if (entry.manifest.facets?.client === undefined) return false
+  return entry.origin === 'builtin' || marketHooksTrust(entry.manifest, entry.dir).trusted
 }
 
 function collectSource(spec: SourceSpec, catalog: SkinCatalog, claimed: Map<string, SkinCatalogEntry>): void {
@@ -126,14 +212,14 @@ function collectSource(spec: SourceSpec, catalog: SkinCatalog, claimed: Map<stri
         // User shadows builtin: replace and note it on the winning entry.
         catalog.skins = catalog.skins.filter((s) => s !== existing)
         const winnerWarnings = [...result.warnings, `shadows the built-in "${manifest.id}" skin`]
-        if (manifest.facets?.client) {
-          winnerWarnings.push('declares hooks.mjs, but hooks only run for built-in (same-review) skins; the hooks facet will be refused')
-        }
+        const trust = marketHooksTrust(manifest, dir)
+        if (trust.warning !== null) winnerWarnings.push(trust.warning)
         const winner: SkinCatalogEntry = {
           manifest,
           origin: 'user',
           dir,
           warnings: winnerWarnings,
+          ...(trust.trusted ? { hooksTrusted: true } : {}),
         }
         claimed.set(manifest.id, winner)
         catalog.skins.push(winner)
@@ -143,33 +229,106 @@ function collectSource(spec: SourceSpec, catalog: SkinCatalog, claimed: Map<stri
       continue
     }
     const warnings = [...result.warnings]
-    if (spec.origin === 'user' && manifest.facets?.client) {
-      warnings.push('declares hooks.mjs, but hooks only run for built-in (same-review) skins; the hooks facet will be refused')
-    }
-    const entry: SkinCatalogEntry = { manifest, origin: spec.origin, dir, warnings }
+    const trust = spec.origin === 'user'
+      ? marketHooksTrust(manifest, dir)
+      : { trusted: false, warning: null }
+    if (trust.warning !== null) warnings.push(trust.warning)
+    // Token contract audit is warning-only (the loader completes partial
+    // sets); surface it on the catalog so third-party skins show their gaps.
+    const contractWarnings = auditTokenContract(stylesheetEntries(manifest, dir))
+    warnings.push(...contractWarnings.warnings)
+    const entry: SkinCatalogEntry = { manifest, origin: spec.origin, dir, warnings, ...(trust.trusted ? { hooksTrusted: true } : {}) }
     claimed.set(manifest.id, entry)
     catalog.skins.push(entry)
   }
 }
 
+/** One memoized catalog snapshot plus the fingerprint it was scanned under. */
+export interface CatalogCacheEntry {
+  /** Fingerprint of both roots at scan time (see rootFingerprint). */
+  fingerprint: string
+  catalog: SkinCatalog
+}
+
+/**
+ * Process-wide cache: (builtinDir, userDir) -> latest snapshot. Shared by
+ * every loadSkinCatalog caller in the host process (index tap, v2 routes,
+ * seed). Tests inject their own Map through the catalogCache option.
+ */
+const DEFAULT_CATALOG_CACHE = new Map<string, CatalogCacheEntry>()
+
+/** Bound the process cache so a long-lived process can never accumulate. */
+const CATALOG_CACHE_MAX_ENTRIES = 16
+
+/**
+ * Cheap invalidation fingerprint of one catalog root: the sorted skin-dir
+ * names plus the stat of each skin.json. The catalog content depends only on
+ * skin.json, so this is the exact change signal — a new or removed skin dir
+ * changes the name set, an in-place manifest change changes the stat. A
+ * missing or unreadable root yields the same marker as an empty source,
+ * mirroring collectSource's silent empty result.
+ */
+function rootFingerprint(root: string): string {
+  let dirNames: string[]
+  try {
+    dirNames = readdirSync(root, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+      .sort()
+  } catch {
+    return ''
+  }
+  const lines: string[] = []
+  for (const dirName of dirNames) {
+    const manifestPath = join(root, dirName, 'skin.json')
+    try {
+      const st = statSync(manifestPath)
+      lines.push(JSON.stringify([dirName, st.mtimeMs, st.size, st.mode]))
+    } catch {
+      lines.push(JSON.stringify([dirName]))
+    }
+  }
+  return lines.join('\n')
+}
+
 /**
  * Snapshot the skin catalog from both sources. Never throws: unreadable
- * roots and invalid skins land in diagnostics instead.
+ * roots and invalid skins land in diagnostics instead. When the source
+ * fingerprint matches the last scan the memoized snapshot is returned as-is
+ * (capturedAt re-stamped to the observation time); a changed fingerprint
+ * triggers a fresh scan and updates the cache.
  */
 export function loadSkinCatalog(options: {
   builtinDir?: string
   userDir?: string
   now?: () => number
+  /** Explicit cache (tests); defaults to the process-wide cache. */
+  catalogCache?: Map<string, CatalogCacheEntry>
 } = {}): SkinCatalog {
+  const builtinDir = options.builtinDir ?? builtinSkinsDir()
+  const userDir = options.userDir ?? userSkinsDir()
+  const cache = options.catalogCache ?? DEFAULT_CATALOG_CACHE
+  const cacheKey = builtinDir + '\u0000' + userDir
+  const fingerprint = JSON.stringify([rootFingerprint(builtinDir), rootFingerprint(userDir)])
+  const hit = cache.get(cacheKey)
+  if (hit && hit.fingerprint === fingerprint) {
+    // Sources unchanged: reuse the immutable snapshot. Only capturedAt is
+    // re-stamped so responses keep reflecting observation time; activation
+    // state lives outside both roots (defaultActiveStatePath), so POST
+    // /active never causes a rescan.
+    return { ...hit.catalog, capturedAt: (options.now ?? Date.now)() }
+  }
   const catalog: SkinCatalog = { skins: [], diagnostics: [], capturedAt: (options.now ?? Date.now)() }
   const claimed = new Map<string, SkinCatalogEntry>()
   // Builtin first so user entries can shadow them.
-  collectSource({ origin: 'builtin', root: options.builtinDir ?? builtinSkinsDir() }, catalog, claimed)
-  collectSource({ origin: 'user', root: options.userDir ?? userSkinsDir() }, catalog, claimed)
+  collectSource({ origin: 'builtin', root: builtinDir }, catalog, claimed)
+  collectSource({ origin: 'user', root: userDir }, catalog, claimed)
   // Unordered skins sort after every ordered one.
   catalog.skins.sort((a, b) => (a.manifest.order ?? Number.MAX_SAFE_INTEGER)
     - (b.manifest.order ?? Number.MAX_SAFE_INTEGER)
     || a.manifest.id.localeCompare(b.manifest.id))
+  cache.set(cacheKey, { fingerprint, catalog })
+  if (cache.size > CATALOG_CACHE_MAX_ENTRIES) cache.clear()
   return catalog
 }
 
@@ -188,4 +347,168 @@ export function resolveInsideSkin(entry: SkinCatalogEntry, relPath: string): str
   const rootWithSep = root.endsWith(sep) ? root : root + sep
   if (abs !== root && !abs.startsWith(rootWithSep)) return null
   return abs
+}
+
+/** Result of uninstalling a user skin directory. */
+export interface UninstallSkinResult {
+  ok: boolean
+  error?: 'invalid-id' | 'skin-not-found' | 'cannot-uninstall-builtin' | 'write-error'
+  detail?: string
+}
+
+/**
+ * Uninstall one user-directory skin by removing its directory under userDir.
+ * Fails closed if the id is invalid, escapes the user directory, or targets a builtin.
+ */
+export function uninstallUserSkin(
+  skinId: string,
+  options: { userDir?: string; catalogCache?: Map<string, CatalogCacheEntry> } = {},
+): UninstallSkinResult {
+  if (!skinId || typeof skinId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(skinId)) {
+    return { ok: false, error: 'invalid-id' }
+  }
+  const userDir = options.userDir ?? userSkinsDir()
+  const target = resolvePath(userDir, skinId)
+  const userRoot = resolvePath(userDir)
+  const userRootWithSep = userRoot.endsWith(sep) ? userRoot : userRoot + sep
+  if (!target.startsWith(userRootWithSep)) {
+    return { ok: false, error: 'invalid-id' }
+  }
+
+  if (!existsSync(target)) {
+    return { ok: false, error: 'skin-not-found' }
+  }
+
+  try {
+    rmSync(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
+  } catch (error) {
+    return { ok: false, error: 'write-error', detail: error instanceof Error ? error.message : String(error) }
+  }
+
+  const cache = options.catalogCache ?? DEFAULT_CATALOG_CACHE
+  cache.clear()
+
+  return { ok: true }
+}
+
+export interface SkinIntegritySummary {
+  total: number
+  valid: number
+  issues: number
+  details: SkinIntegrityReport[]
+}
+
+/**
+ * Verify integrity of all skins in the catalog.
+ */
+export function verifyAllSkinsIntegrity(catalog: SkinCatalog): SkinIntegritySummary {
+  const details: SkinIntegrityReport[] = []
+  let validCount = 0
+  let issuesCount = 0
+
+  for (const entry of catalog.skins) {
+    const isBuiltin = entry.origin === 'builtin'
+    const hooksEntry = entry.manifest.facets?.client?.entry ?? null
+    const report = verifySkinIntegrity(entry.dir, entry.manifest.id, {
+      isBuiltin,
+      hooksEntry,
+    })
+    details.push(report)
+    if (report.status === 'valid') {
+      validCount++
+    } else {
+      issuesCount++
+    }
+  }
+
+  return {
+    total: details.length,
+    valid: validCount,
+    issues: issuesCount,
+    details,
+  }
+}
+
+export interface RepairAllSummary extends SkinIntegritySummary {
+  repaired: string[]
+  repairFailed: Array<{ id: string; error: string }>
+}
+
+/**
+ * Repairs a specific user skin by id.
+ */
+export async function repairSkin(
+  skinId: string,
+  options: {
+    userDir?: string
+    catalogCache?: Map<string, unknown>
+    fetchImpl?: typeof fetch
+    timeoutMs?: number
+    localSourceDir?: string
+  } = {},
+): Promise<SkinRepairResult> {
+  const userDir = options.userDir ?? userSkinsDir()
+  const destDir = join(userDir, skinId)
+  const res = await repairSkinFromMarket(destDir, skinId, {
+    fetchImpl: options.fetchImpl,
+    timeoutMs: options.timeoutMs,
+    localSourceDir: options.localSourceDir,
+  })
+  if (res.ok) {
+    const cache = options.catalogCache ?? DEFAULT_CATALOG_CACHE
+    cache.clear()
+  }
+  return res
+}
+
+/**
+ * Verifies all skins in catalog, and automatically repairs any skin with integrity issues.
+ */
+export async function verifyAndRepairAllSkins(
+  catalogGetter: () => SkinCatalog,
+  options: {
+    userDir?: string
+    catalogCache?: Map<string, unknown>
+    fetchImpl?: typeof fetch
+    timeoutMs?: number
+    localSourceDir?: string
+    autoRepair?: boolean
+  } = {},
+): Promise<RepairAllSummary> {
+  const initialCatalog = catalogGetter()
+  const initialSummary = verifyAllSkinsIntegrity(initialCatalog)
+
+  if (options.autoRepair === false || initialSummary.issues === 0) {
+    return {
+      ...initialSummary,
+      repaired: [],
+      repairFailed: [],
+    }
+  }
+
+  const repaired: string[] = []
+  const repairFailed: Array<{ id: string; error: string }> = []
+
+  for (const report of initialSummary.details) {
+    if (report.status !== 'valid') {
+      const skinEntry = findSkin(initialCatalog, report.id)
+      if (skinEntry && skinEntry.origin === 'user') {
+        const res = await repairSkin(report.id, options)
+        if (res.ok) {
+          repaired.push(report.id)
+        } else {
+          repairFailed.push({ id: report.id, error: res.error ?? 'unknown-error' })
+        }
+      }
+    }
+  }
+
+  const freshCatalog = catalogGetter()
+  const freshSummary = verifyAllSkinsIntegrity(freshCatalog)
+
+  return {
+    ...freshSummary,
+    repaired,
+    repairFailed,
+  }
 }

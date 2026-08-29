@@ -1,11 +1,11 @@
 {
-  "generated": "2026-08-22",
+  "generated": "2026-08-28",
   "items": [
     {
       "id": "whale-song",
       "name": "鲸吟",
       "nameEn": "Whale Song",
-      "author": "dsh-web-ui",
+      "author": "dsh-web",
       "rank": 1,
       "tagline": "深海鲸语女神背景 · 冰蓝海洋调色板 · 金色细线点缀",
       "description": "《鲸吟》— 深海鲸语女神主题：无文字纯氛围背景画（蓝发女神与鲸群居左、冰蓝星座网格与金线点缀、右侧大量留白）垫在半透明面板之下，遮罩随亮/暗主题实时切换，冰蓝/浅青/深海军蓝/钴蓝冷色体系重映射到全部 dsh token，暗色变体为深海夜航调。",
@@ -23,6 +23,17 @@
         "light": "assets/skins/whale-song/preview/light.jpg",
         "dark": "assets/skins/whale-song/preview/dark.jpg"
       },
+      "files": [
+        "assets/whale-art.webp",
+        "assets/whale-icon.png",
+        "hooks.mjs",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/whale-song",
       "contributes": {
         "stylesheet": "skin.css",
         "patches": "patches.css",
@@ -59,7 +70,7 @@
       "id": "blue-fantasy",
       "name": "蓝色幻想",
       "nameEn": "Blue Fantasy",
-      "author": "powerdog996（DreamSkin 社区）· dsh-web-ui 适配",
+      "author": "powerdog996（DreamSkin 社区）· dsh-web 适配",
       "rank": 2,
       "tagline": "鲸鱼插画背景 · periwinkle 靛蓝调色板 · 半透明面板",
       "description": "DreamSkin「DeepSeek-鲸鱼娘」Codex 桌面主题的 dsh 适配：鲸鱼插画背景垫在半透明面板之下，遮罩随亮/暗主题实时切换，periwinkle 靛蓝色调重映射到全部 dsh token。",
@@ -76,6 +87,17 @@
         "light": "assets/skins/blue-fantasy/preview/light.jpg",
         "dark": "assets/skins/blue-fantasy/preview/dark.jpg"
       },
+      "files": [
+        "assets/whale-art.jpg",
+        "assets/whale-icon.png",
+        "hooks.mjs",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/blue-fantasy",
       "contributes": {
         "stylesheet": "skin.css",
         "patches": "patches.css",
@@ -131,6 +153,17 @@
         "light": "assets/skins/harbor/preview/light.jpg",
         "dark": "assets/skins/harbor/preview/dark.jpg"
       },
+      "files": [
+        "assets/harbor-art.webp",
+        "assets/harbor-icon.svg",
+        "hooks.mjs",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/harbor",
       "contributes": {
         "stylesheet": "skin.css",
         "patches": "patches.css",
@@ -167,7 +200,7 @@
       "id": "xp",
       "name": "Windows XP (Luna)",
       "nameEn": "Windows XP Luna",
-      "author": "dsh-web-ui",
+      "author": "dsh-web",
       "rank": 6,
       "tagline": "Luna 蓝窗口条 · 绿色开始按钮 · Bliss 蓝天桌面",
       "description": "Windows XP (Luna) 复古主题：蓝色渐变窗口条带窗口按钮、米色状态栏（大写/数字/滚动指示灯）、侧边栏任务栏上的绿色「开始」按钮、资源管理器风格树行和 Bliss 蓝天桌面，全局直角。",
@@ -184,6 +217,15 @@
         "light": "assets/skins/xp/preview/light.jpg",
         "dark": "assets/skins/xp/preview/dark.jpg"
       },
+      "files": [
+        "hooks.mjs",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/xp",
       "contributes": {
         "stylesheet": "skin.css",
         "patches": "patches.css"
@@ -208,7 +250,7 @@
       "id": "dragon-heir",
       "name": "龙的传人",
       "nameEn": "Dragon Heir",
-      "author": "dsh-web-ui",
+      "author": "dsh-web",
       "rank": 7,
       "tagline": "不屈龙魂 · 万里长城双主题 · 朱砂龙印",
       "description": "龙的传人 — 一面是不屈龙魂（墨龙穿云、朱砂印章、不屈锋芒），一面是万里长城（青黛山色、金晖镀墙、苍茫暮色）。亮暗主题各自配一幅画与一枚龙印 favicon，面板半透明磨砂，让画透出来。",
@@ -226,6 +268,17 @@
         "light": "assets/skins/dragon-heir/preview/light.jpg",
         "dark": "assets/skins/dragon-heir/preview/dark.jpg"
       },
+      "files": [
+        "assets/dark-art.webp",
+        "assets/light-art.webp",
+        "hooks.mjs",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/dragon-heir",
       "contributes": {
         "stylesheet": "skin.css",
         "patches": "patches.css",
@@ -262,7 +315,7 @@
       "id": "minecraft",
       "name": "Minecraft 方块世界",
       "nameEn": "Minecraft Voxel",
-      "author": "dsh-web-ui",
+      "author": "dsh-web",
       "rank": 8,
       "tagline": "动态全景天空盒 · 方块按钮 · 告示牌输入框",
       "description": "复刻《我的世界》主界面氛围的方块皮肤：程序化绘制的像素全景天空盒（方块山、像素云、方块树、草方块地面）在身后缓慢旋转，界面浮在石板上；按钮还原 MC 菜单按钮（灰石板、悬停变黄、按下下沉），输入框做成带钉子的木告示牌。",
@@ -280,6 +333,15 @@
         "light": "assets/skins/minecraft/preview/light.jpg",
         "dark": "assets/skins/minecraft/preview/dark.jpg"
       },
+      "files": [
+        "hooks.mjs",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/minecraft",
       "contributes": {
         "stylesheet": "skin.css",
         "patches": "patches.css"
@@ -304,7 +366,7 @@
       "id": "trading",
       "name": "交易终端",
       "nameEn": "Trading Terminal",
-      "author": "dsh-web-ui",
+      "author": "dsh-web",
       "rank": 9,
       "tagline": "实时行情跑马灯 · 长桥港美股行情 · 红涨绿跌交易终端",
       "description": "结合 dsh-fun-ticker 行情跑马灯与 dsh-longbridge 港美股行情的炒股皮肤：顶栏滚动 A股/港股/美股/指数/加密/外汇报价（装 fun-ticker 后跟随你的自选列表），状态栏展示长桥行情快照与 A股/港股/美股交易时段，写代码也像盯盘。",
@@ -322,6 +384,15 @@
         "light": "assets/skins/trading/preview/light.jpg",
         "dark": "assets/skins/trading/preview/dark.jpg"
       },
+      "files": [
+        "hooks.mjs",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/trading",
       "contributes": {
         "stylesheet": "skin.css",
         "patches": "patches.css"
@@ -364,6 +435,17 @@
         "light": "assets/skins/miku/preview/light.jpg",
         "dark": "assets/skins/miku/preview/dark.jpg"
       },
+      "files": [
+        "assets/miku-art-light.jpg",
+        "assets/miku-art.webp",
+        "hooks.mjs",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/miku",
       "contributes": {
         "stylesheet": "skin.css",
         "patches": "patches.css",
@@ -400,7 +482,7 @@
       "id": "whale-mom",
       "name": "鲸鱼妈妈",
       "nameEn": "Whale Mom",
-      "author": "dsh-web-ui",
+      "author": "dsh-web",
       "rank": 11,
       "tagline": "深海鲸鱼妈妈与幼崽的画作 · 全透面板由背景遮挡驱动 · 金线点缀",
       "description": "dsh web ui 的鲸鱼妈妈主题皮肤：深海鲸鱼妈妈与幼崽们的氛围画作铺满视口，面板全透（透明度由设置-皮肤中心的背景遮挡滑杆驱动，侧边栏基准透明度可用 --dsw-skin-sidebar-alpha 微调），深蓝 / 奶油 / 金色配色贯穿全局，暗色是深海夜航。",
@@ -417,6 +499,17 @@
         "light": "assets/skins/whale-mom/preview/light.jpg",
         "dark": "assets/skins/whale-mom/preview/dark.jpg"
       },
+      "files": [
+        "assets/whale-icon.svg",
+        "assets/whale-mom-art.jpg",
+        "hooks.mjs",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/whale-mom",
       "contributes": {
         "stylesheet": "skin.css",
         "patches": "patches.css",
@@ -471,6 +564,15 @@
         "light": "assets/skins/matrix/preview/light.jpg",
         "dark": "assets/skins/matrix/preview/dark.jpg"
       },
+      "files": [
+        "hooks.mjs",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/matrix",
       "contributes": {
         "stylesheet": "skin.css",
         "patches": "patches.css"
@@ -507,15 +609,55 @@
         "ornate",
         "glass"
       ],
-      "version": "0.3.0",
+      "version": "0.3.1",
       "accent": "#c5a468",
       "preview": {
         "light": "assets/skins/maid-atelier/preview/light.jpg",
         "dark": "assets/skins/maid-atelier/preview/dark.jpg"
       },
+      "files": [
+        "LICENSE",
+        "NOTICE",
+        "assets/maid-atelier-icon.webp",
+        "assets/maid-atelier-maid-left-v5.webp",
+        "assets/maid-atelier-maid-right-v6.webp",
+        "assets/maid-atelier-palace-day-v4.webp",
+        "assets/maid-atelier-palace-night-v4.webp",
+        "assets/maid-bottom-crest-v1.webp",
+        "assets/maid-bottom-trim-tile-v1.webp",
+        "assets/maid-bow-v1.webp",
+        "assets/maid-chibi-v1.webp",
+        "assets/maid-composer-frame-v4.webp",
+        "assets/maid-new-session-v1.webp",
+        "assets/maid-settings-frame-v1.webp",
+        "assets/maid-sidebar-corner-v1.webp",
+        "assets/maid-sidebar-swag-v1.webp",
+        "assets/maid-top-trim-tile-v1.webp",
+        "assets/maid-workspace-ribbon-v2.webp",
+        "assets/maid-workspace-shield-v2.webp",
+        "hooks.mjs",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/Small-tailqwq/dsh-deep-whale/tree/main/maid-atelier",
       "contributes": {
         "stylesheet": "skin.css",
-        "patches": "patches.css"
+        "patches": "patches.css",
+        "backgroundMedia": {
+          "light": {
+            "type": "image",
+            "src": "assets/skins/maid-atelier/assets/maid-atelier-palace-day-v4.webp",
+            "scrim": "linear-gradient(rgba(248, 250, 255, 0.12) 0%, rgba(235, 240, 250, 0.18) 55%, rgba(220, 230, 245, 0.25) 100%)"
+          },
+          "dark": {
+            "type": "image",
+            "src": "assets/skins/maid-atelier/assets/maid-atelier-palace-night-v4.webp",
+            "scrim": "linear-gradient(rgba(9, 19, 51, 0.15) 0%, rgba(16, 32, 77, 0.25) 60%, rgba(8, 15, 39, 0.35) 100%)"
+          }
+        }
       },
       "requires": {
         "contracts": [
@@ -537,7 +679,7 @@
       "id": "summer-liquid-glass",
       "name": "夏沫琉璃",
       "nameEn": "Summer Liquid Glass",
-      "author": "dsh-web-ui",
+      "author": "dsh-web",
       "rank": 14,
       "tagline": "日系夏祭背景 · iOS 26 液态玻璃 · 冰青玫瑰琥珀三强调",
       "description": "《夏沫琉璃》— 日系夏祭背景 + iOS 26 液态玻璃主题：人物与烟花在分层半透明玻璃面板之后若隐若现，玻璃面板带内缘高光、非均匀边缘反射与柔和扩散阴影；冰青 #67DCE7 作主要交互、玫瑰粉 #DD8FAC 作选中与品牌细节、琥珀金 #F3B75F 作运行中与重要提示、黄绿 #CBE77D 仅用于成功。代码、终端、日志与聊天区使用更低透明度的高可读玻璃，长时间使用不累眼。",
@@ -556,6 +698,17 @@
         "light": "assets/skins/summer-liquid-glass/preview/light.jpg",
         "dark": "assets/skins/summer-liquid-glass/preview/dark.jpg"
       },
+      "files": [
+        "README.md",
+        "README.zh.md",
+        "assets/summer-liquid-glass-art.jpg",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/summer-liquid-glass",
       "contributes": {
         "stylesheet": "skin.css",
         "patches": "patches.css",
@@ -580,7 +733,7 @@
       "author": "sclass53",
       "rank": 67,
       "tagline": "芙宁娜背景 · 淡蓝主题 · 半透明面板",
-      "description": "基于原神角色芙宁娜的dsh-web-ui主题",
+      "description": "基于原神角色芙宁娜的dsh-web主题",
       "tags": [
         "blue",
         "Furina",
@@ -593,6 +746,20 @@
         "light": "assets/skins/furina/preview/light.jpg",
         "dark": "assets/skins/furina/preview/dark.jpg"
       },
+      "files": [
+        "LICENSE",
+        "README.md",
+        "README.zh.md",
+        "assets/furina-art.jpg",
+        "assets/furina-icon.png",
+        "hooks.mjs",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/furina",
       "contributes": {
         "stylesheet": "skin.css",
         "patches": "patches.css",
@@ -629,7 +796,7 @@
       "id": "mint",
       "name": "薄荷",
       "nameEn": "Mint",
-      "author": "dsh-web-ui",
+      "author": "dsh-web",
       "rank": 99,
       "tagline": "纯 token 范例皮肤 · 零补丁零脚本 · 社区作者的起点模板",
       "description": "薄荷是官方锚定的范例皮肤：只重映射官方 --dsw-alias-* 语义 token（L1），不含 patches.css、hooks.mjs 与背景媒体，展示一个新皮肤所需的全部最小要素。社区作者复制本目录、改颜色、改 id 即可发布一个永远安全的皮肤。",
@@ -646,6 +813,13 @@
         "light": "assets/skins/mint/preview/light.jpg",
         "dark": "assets/skins/mint/preview/dark.jpg"
       },
+      "files": [
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/mint",
       "contributes": {
         "stylesheet": "skin.css"
       }
@@ -673,6 +847,19 @@
         "light": "assets/skins/cyber-night/preview/light.jpg",
         "dark": "assets/skins/cyber-night/preview/dark.jpg"
       },
+      "files": [
+        "README.md",
+        "README.zh.md",
+        "assets/cyber-night-art.webp",
+        "assets/cyber-night-icon.svg",
+        "hooks.mjs",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/cyber-night",
       "contributes": {
         "stylesheet": "skin.css",
         "patches": "patches.css",
@@ -728,6 +915,23 @@
         "light": "assets/skins/deep-current/preview/light.jpg",
         "dark": "assets/skins/deep-current/preview/dark.jpg"
       },
+      "files": [
+        "README.i18n.yaml",
+        "README.md",
+        "README.zh.md",
+        "assets/contour-field.svg",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/gui-dark.gif",
+        "preview/gui-dark.png",
+        "preview/gui-light.png",
+        "preview/gui-settings-dark.png",
+        "preview/gui-settings-light.png",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/deep-current",
       "contributes": {
         "stylesheet": "skin.css",
         "patches": "patches.css"
@@ -740,44 +944,135 @@
       "author": "guomengjia618-dot",
       "rank": 101,
       "tagline": "奶油粉与樱花玫瑰色组成的克制开发者主题",
-      "description": "粉樱以低饱和奶油粉、玫瑰强调色和暖灰文字重塑 DSH Web GUI。亮暗两态均保留成功、警告、错误等语义色，并通过 L2 语义属性覆盖任务看板、Git 图谱、SSH、设置卡和鲸鱼娘等插件区域；Wallpaper Engine 启用时自动切换为半透明面板。",
+      "description": "粉樱以低饱和奶油粉、玫瑰强调色和暖灰文字重塑 DSH Web GUI。亮暗两态均保留成功、警告、错误等语义色，并通过 L2 语义属性覆盖任务看板、Git 图谱、SSH、设置卡和鲸鱼娘等插件区域；Wallpaper Engine 或手动背景可见时，面板自动切换为半透明磨砂玻璃态。",
       "tags": [
         "pink",
         "sakura",
         "rose",
         "developer",
         "light-dark",
+        "glass",
         "wallpaper"
       ],
-      "version": "1.0.0",
+      "version": "1.1.0",
       "accent": "#ff7fae",
       "preview": {
         "light": "assets/skins/pink-sakura/preview/light.jpg",
         "dark": "assets/skins/pink-sakura/preview/dark.jpg"
       },
+      "files": [
+        "LICENSE",
+        "README.md",
+        "README.zh.md",
+        "assets/paw.png",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/pink-sakura",
       "contributes": {
         "stylesheet": "skin.css"
+      }
+    },
+    {
+      "id": "war-thunder",
+      "name": "战争雷霆 · 钢铁前线",
+      "nameEn": "War Thunder Frontline",
+      "author": "dsh-web",
+      "rank": 102,
+      "tagline": "游戏登录背景 · 橄榄军绿玻璃面板 · 星徽标题栏与陆海空模式条",
+      "description": "以战争雷霆（War Thunder）游戏美术为灵感的军事主题皮肤：亮暗主题各配一幅游戏内登录背景（取自本机游戏客户端素材，只读解包后重新编码），橄榄军绿半透明面板透出战场景，标题栏带官方星徽，底部是 TANKS / AVIATION / FLEET 三段模式条，琥珀金强调色贯穿按钮与选区。",
+      "tags": [
+        "war-thunder",
+        "military",
+        "aviation",
+        "tank",
+        "navy",
+        "game"
+      ],
+      "version": "0.1.0",
+      "accent": "#d9a441",
+      "preview": {
+        "light": "assets/skins/war-thunder/preview/light.png",
+        "dark": "assets/skins/war-thunder/preview/dark.png"
+      },
+      "files": [
+        "README.md",
+        "README.zh.md",
+        "assets/dark-art.webp",
+        "assets/light-art.webp",
+        "assets/wt-icon.webp",
+        "hooks.mjs",
+        "patches.css",
+        "preview/dark.png",
+        "preview/light.png",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/war-thunder",
+      "contributes": {
+        "stylesheet": "skin.css",
+        "patches": "patches.css",
+        "backgroundMedia": {
+          "light": {
+            "type": "image",
+            "src": "assets/skins/war-thunder/assets/light-art.webp",
+            "scrim": "linear-gradient(rgba(239, 234, 218, 0.04) 0%, rgba(233, 227, 209, 0.06) 55%, rgba(222, 214, 192, 0.09) 100%)"
+          },
+          "dark": {
+            "type": "image",
+            "src": "assets/skins/war-thunder/assets/dark-art.webp",
+            "scrim": "linear-gradient(rgba(9, 11, 8, 0.1) 0%, rgba(11, 13, 10, 0.14) 60%, rgba(8, 10, 8, 0.18) 100%)"
+          }
+        }
+      },
+      "requires": {
+        "contracts": [
+          {
+            "apiVersion": "x-org.linxin666.skin-center/v1alpha1",
+            "kind": "SkinHooks",
+            "optional": true
+          }
+        ]
+      },
+      "facets": {
+        "client": {
+          "entry": "hooks.mjs",
+          "apiVersion": "x-org.linxin666.skin-center/v1alpha1"
+        }
       }
     },
     {
       "id": "wallpaper-exclusive",
       "name": "壁纸专属",
       "nameEn": "Wallpaper Exclusive",
-      "author": "dsh-web-ui",
+      "author": "chemmy-11",
       "rank": 999,
       "tagline": "壁纸优先 · 液态玻璃面板",
-      "description": "官方默认底座 + 气泡/代码块/任务清单/插件面板等浮层液态玻璃，壁纸从背后透出，不画自己的背景；输入卡由 web-ui 统一设计，面板固定半透明磨砂，不随滑杆驱动。",
+      "description": "作者 chemmy-11。默认背景为深海鲸语女神 v2，壁纸从面板背后透出，不画自己的背景；气泡 / 代码块 / 任务清单 / 插件面板及命令、权限、模型、上下文四看板展开层为液态玻璃，气泡模糊强度由皮肤中心滑杆驱动；排队消息以单层玻璃裸浮呈现，排队期间输入卡自动隐去铬层。",
       "tags": [
         "wallpaper",
         "glass",
         "translucent"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "accent": "#0d1627",
       "preview": {
         "light": "assets/skins/wallpaper-exclusive/preview/light.jpg",
         "dark": "assets/skins/wallpaper-exclusive/preview/dark.jpg"
       },
+      "files": [
+        "README.md",
+        "README.zh.md",
+        "assets/whale-art-v2.png",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/wallpaper-exclusive",
       "contributes": {
         "stylesheet": "skin.css",
         "patches": "patches.css",
@@ -793,6 +1088,155 @@
             "scrim": "linear-gradient(rgba(7, 19, 33, 0.34) 0%, rgba(7, 19, 33, 0.28) 45%, rgba(7, 19, 33, 0.38) 100%)"
           }
         }
+      }
+    },
+    {
+      "id": "future-window",
+      "name": "云轨舱窗",
+      "nameEn": "Skyrail Cabin",
+      "author": "zhuqin",
+      "rank": 1000,
+      "tagline": "一扇窗，两座城：晨光通透，夜色沉静",
+      "description": "以未来城市舱窗为背景的昼夜双主题皮肤，使用冰蓝玻璃表面、深海军蓝夜景和猫耳软枕入口组营造安静的工作舱体验。",
+      "tags": [
+        "city",
+        "day-night",
+        "glass",
+        "anime",
+        "cat"
+      ],
+      "version": "1.4.3",
+      "accent": "#2c86c6",
+      "preview": {
+        "light": "assets/skins/future-window/preview/light.jpg",
+        "dark": "assets/skins/future-window/preview/dark.jpg"
+      },
+      "files": [
+        "LICENSE",
+        "NOTICE",
+        "README.md",
+        "README.zh.md",
+        "assets/light.webp",
+        "assets/night.webp",
+        "assets/pillow-dark.webp",
+        "assets/pillow-light.webp",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/future-window",
+      "contributes": {
+        "stylesheet": "skin.css",
+        "patches": "patches.css",
+        "backgroundMedia": {
+          "light": {
+            "type": "image",
+            "src": "assets/skins/future-window/assets/light.webp",
+            "scrim": "radial-gradient(ellipse at 54% 48%, rgba(244, 249, 255, 0.34) 0%, rgba(238, 247, 255, 0.18) 38%, rgba(233, 244, 255, 0.08) 68%, rgba(247, 250, 255, 0.16) 100%)"
+          },
+          "dark": {
+            "type": "image",
+            "src": "assets/skins/future-window/assets/night.webp",
+            "scrim": "linear-gradient(100deg, rgba(2, 13, 31, 0.18) 0%, rgba(4, 22, 48, 0.05) 52%, rgba(3, 11, 25, 0.22) 100%)"
+          }
+        }
+      }
+    },
+    {
+      "id": "orca-link",
+      "name": "虎鲸链路",
+      "nameEn": "ORCA LINK",
+      "author": "Small-tailqwq",
+      "rank": 1001,
+      "tagline": "珍珠白机械舱 · 黑曜虎鲸操作员 · 电蓝链路信号",
+      "description": "为原创虎鲸操作员定制的轻量二次元科幻皮肤：亮色空态以眨眼角色迎接用户，任务开始后交叉淡化为操作台工作场景；暗色空态以持杯角色迎接用户，任务开始后切换为阅读工作场景；石墨黑结构件和克制的电蓝信号贯穿侧栏、会话、输入区与扩展面板。",
+      "tags": [
+        "orca",
+        "mechanical",
+        "monochrome",
+        "anime",
+        "blue"
+      ],
+      "version": "0.1.0",
+      "accent": "#086cff",
+      "preview": {
+        "light": "assets/skins/orca-link/preview/light.jpg",
+        "dark": "assets/skins/orca-link/preview/dark.jpg"
+      },
+      "files": [
+        "LICENSE",
+        "NOTICE",
+        "README.md",
+        "README.zh.md",
+        "assets/orca-link-dark-active.webp",
+        "assets/orca-link-dark-hero.webp",
+        "assets/orca-link-light-active.webp",
+        "assets/orca-link-light-hero.webp",
+        "assets/orca-link-status-atlas.webp",
+        "hooks.mjs",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/Small-tailqwq/dsh-deep-whale/tree/main/orca-link",
+      "contributes": {
+        "stylesheet": "skin.css",
+        "patches": "patches.css"
+      },
+      "requires": {
+        "contracts": [
+          {
+            "apiVersion": "x-org.linxin666.skin-center/v1alpha1",
+            "kind": "SkinHooks",
+            "optional": true
+          }
+        ]
+      },
+      "facets": {
+        "client": {
+          "entry": "hooks.mjs",
+          "apiVersion": "x-org.linxin666.skin-center/v1alpha1"
+        }
+      }
+    },
+    {
+      "id": "catppuccin",
+      "name": "Catppuccin",
+      "nameEn": "Catppuccin",
+      "author": "Catppuccin 社区配色 · dsh-web 适配",
+      "rank": 1002,
+      "tagline": "柔和色彩主题 · Latte 浅色 / Mocha 深色 · 平铺纯色面板",
+      "description": "将知名 Catppuccin 配色移植为 dsh 皮肤：浅色方案使用 Latte 调色板，深色方案使用 Mocha 调色板，全部 dsh 设计令牌重映射，整套以纯色平铺面板呈现，柔和低饱和，适合长时间阅读。",
+      "tags": [
+        "catppuccin",
+        "latte",
+        "mocha",
+        "pastel",
+        "flat"
+      ],
+      "version": "1.0.0",
+      "accent": "#8839ef",
+      "preview": {
+        "light": "assets/skins/catppuccin/preview/light.jpg",
+        "dark": "assets/skins/catppuccin/preview/dark.jpg"
+      },
+      "files": [
+        "README.md",
+        "README.zh.md",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/catppuccin",
+      "contributes": {
+        "stylesheet": "skin.css",
+        "patches": "patches.css"
       }
     }
   ]

@@ -12,17 +12,27 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import {
-  isBranchesView, isGitError, isGraphView, isRepoStatus,
-  type GitError,
+  isBranchesView, isGitError, isGitFeatureConfig, isGraphView, isRepoStatus,
+  isWorktreeListView,
+  type GitError, type GitFeatureConfig,
 } from '../core/types.ts'
 import { PollGuard } from './poll-guard.ts'
 import { isGitAllowed } from './access.ts'
+import { readJsonBody, writeJson } from './http.ts'
 import type { GitService } from './git-service.ts'
+import { worktreesHome } from './worktree-home.ts'
 
 /** Envelope every /git JSON response carries. */
 export type GitEnvelope<T> =
   | { ok: true; value: T }
   | { ok: false; error: GitError }
+
+/** Test-friendly default: every gateable feature off, the real managed home. */
+const defaultFeatureConfig = (): GitFeatureConfig => ({
+  autoIsolate: false,
+  autoBaseline: 'current',
+  worktreesHome: worktreesHome(),
+})
 
 const OK = (value: unknown): GitEnvelope<unknown> => ({ ok: true, value })
 const FAIL = (error: GitError): GitEnvelope<never> => ({ ok: false, error })
@@ -34,6 +44,8 @@ const BAD_REQUEST: GitError = { code: 'internal', message: 'malformed request' }
 interface Subscriber {
   path: string
   last: string
+  /** Last successfully listed worktree digest (kept across failed probes). */
+  lastWorktreeDigest?: string
   res: ServerResponse
   statusAbort?: AbortController
 }
@@ -71,51 +83,11 @@ const POLL_LIFETIME_MS = Number.MAX_SAFE_INTEGER
 /** Git operation error for a structurally invalid service view (never a workspace fault). */
 const MALFORMED_VIEW: GitError = { code: 'internal', message: 'malformed git response' }
 
-/** Request body size cap; larger bodies are destroyed rather than drained. */
-const BODY_CAP_BYTES = 1 << 20
-
-/** Write the shared non-loopback rejection (same body as dsh-ssh). */
-function forbidden(res: ServerResponse): void {
-  res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
-  res.end(JSON.stringify({ error: 'forbidden: loopback-only' }))
-}
-
-/** Read a JSON request body into an unknown value; null when unparseable. */
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = []
-  let total = 0
-  for await (const chunk of req) {
-    const part = chunk as Buffer
-    total += part.length
-    if (total > BODY_CAP_BYTES) {
-      // Stop reading (no drain) and tear the connection down; the oversized
-      // body is never parsed.
-      req.destroy()
-      chunks.length = 0
-      return null
-    }
-    chunks.push(part)
-  }
-  const text = Buffer.concat(chunks).toString('utf8')
-  if (text === '') return null
-  try {
-    return JSON.parse(text) as unknown
-  } catch {
-    return null
-  }
-}
-
 /** Extract the required string field from a JSON object payload. */
 function pathOf(payload: unknown): string | null {
   if (typeof payload !== 'object' || payload === null) return null
   const path = (payload as Record<string, unknown>).path
   return typeof path === 'string' && path !== '' ? path : null
-}
-
-/** Write one JSON envelope response. */
-function json(res: ServerResponse, envelope: GitEnvelope<unknown>, status = 200): void {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
-  res.end(JSON.stringify(envelope))
 }
 
 /**
@@ -128,10 +100,10 @@ function json(res: ServerResponse, envelope: GitEnvelope<unknown>, status = 200)
  */
 function okView(res: ServerResponse, value: unknown, guard: (view: unknown) => boolean): void {
   if (value !== null && !guard(value)) {
-    json(res, FAIL(MALFORMED_VIEW))
+    writeJson(res, 200, FAIL(MALFORMED_VIEW))
     return
   }
-  json(res, OK(value))
+  writeJson(res, 200, OK(value))
 }
 
 /**
@@ -139,9 +111,10 @@ function okView(res: ServerResponse, value: unknown, guard: (view: unknown) => b
  * SSE stream — longest-prefix-wins keeps them disjoint).
  * @param ctx - context carrying the webServer service.
  * @param service - the workspace-gated git service.
+ * @param config - live feature-config thunk (the /git/config view; settings-driven). Optional for tests: the default disables every gateable feature.
  * @returns the route disposers.
  */
-export function registerGitRoutes(ctx: Context, service: GitService): () => void {
+export function registerGitRoutes(ctx: Context, service: GitService, config: () => GitFeatureConfig = defaultFeatureConfig): () => void {
   const subscribers = new Set<Subscriber>()
   // The poll loop's lifetime is bound to the subscriber set: created/started
   // when the first subscriber joins, stopped when the last one closes.
@@ -191,7 +164,21 @@ export function registerGitRoutes(ctx: Context, service: GitService): () => void
       subscriber.statusAbort = controller
       try {
         const status = await statusWithDeadline(subscriber.path, controller)
-        const key = status === null ? 'no-repo' : `${status.root}|${status.branch}|${status.head}`
+        // Worktree membership rides the same change key: `git worktree
+        // add/remove` elsewhere never moves the checkout's branch/head, but
+        // the worktree manager must still refresh. A failed list keeps the
+        // previous digest so a transient error never flaps the stream.
+        let worktreeDigest = subscriber.lastWorktreeDigest ?? ''
+        try {
+          const view = await service.worktrees(subscriber.path, controller.signal)
+          if (view !== null) {
+            worktreeDigest = view.worktrees.map(item => `${item.path}:${item.branch}:${item.head}`).join(',')
+            subscriber.lastWorktreeDigest = worktreeDigest
+          }
+        } catch {
+          // tolerate: the status half still covers branch changes
+        }
+        const key = status === null ? 'no-repo' : `${status.root}|${status.branch}|${status.head}|wt:${worktreeDigest}`
         if (key === subscriber.last) return
         subscriber.last = key
         push(subscriber, { path: subscriber.path, status })
@@ -209,7 +196,7 @@ export function registerGitRoutes(ctx: Context, service: GitService): () => void
     // Trust fence first: never let an unpaired LAN client reach any /git
     // operation, regardless of method or content-type.
     if (!isGitAllowed(ctx, req)) {
-      forbidden(res)
+      writeJson(res, 403, { error: 'forbidden: loopback-only' })
       return
     }
     if (req.method !== 'POST') {
@@ -228,10 +215,18 @@ export function registerGitRoutes(ctx: Context, service: GitService): () => void
       return
     }
     const pathname = new URL(req.url ?? '/', 'http://x').pathname
-    const payload = await readJsonBody(req)
+    const payload = await readJsonBody(req, { maxBytes: 1024 * 1024 })
+    // The feature config is pathless: the browser reads it before any
+    // workspace resolution (the auto-isolation wrapper consults it on every
+    // New Session action, so a settings toggle applies without a reload).
+    if (pathname === '/git/config') {
+      const view = config()
+      writeJson(res, 200, isGitFeatureConfig(view) ? OK(view) : FAIL(MALFORMED_VIEW))
+      return
+    }
     const path = pathOf(payload)
     if (path === null) {
-      json(res, FAIL(BAD_REQUEST))
+      writeJson(res, 200, FAIL(BAD_REQUEST))
       return
     }
     switch (pathname) {
@@ -240,7 +235,7 @@ export function registerGitRoutes(ctx: Context, service: GitService): () => void
           okView(res, await statusWithDeadline(path), isRepoStatus)
         } catch (error: unknown) {
           ctx.logger.warn(`dsh-git-graph: status request failed for ${path}: ${String(error)}`)
-          json(res, FAIL({ code: 'internal', message: STATUS_TIMEOUT_MESSAGE }))
+          writeJson(res, 200, FAIL({ code: 'internal', message: STATUS_TIMEOUT_MESSAGE }))
         }
         return
       case '/git/branches':
@@ -261,11 +256,11 @@ export function registerGitRoutes(ctx: Context, service: GitService): () => void
           ? (payload as Record<string, unknown>).branch
           : undefined
         if (typeof branch !== 'string' || branch === '') {
-          json(res, FAIL(BAD_REQUEST))
+          writeJson(res, 200, FAIL(BAD_REQUEST))
           return
         }
         const result = await service.switchBranch(path, branch)
-        json(res, result.ok ? OK({ branch: result.branch }) : FAIL(isGitError(result.error) ? result.error : MALFORMED_VIEW))
+        writeJson(res, 200, result.ok ? OK({ branch: result.branch }) : FAIL(isGitError(result.error) ? result.error : MALFORMED_VIEW))
         return
       }
       case '/git/create-branch': {
@@ -273,11 +268,47 @@ export function registerGitRoutes(ctx: Context, service: GitService): () => void
           ? (payload as Record<string, unknown>).name
           : undefined
         if (typeof name !== 'string' || name === '') {
-          json(res, FAIL(BAD_REQUEST))
+          writeJson(res, 200, FAIL(BAD_REQUEST))
           return
         }
         const result = await service.createBranch(path, name)
-        json(res, result.ok ? OK({ branch: result.branch }) : FAIL(isGitError(result.error) ? result.error : MALFORMED_VIEW))
+        writeJson(res, 200, result.ok ? OK({ branch: result.branch }) : FAIL(isGitError(result.error) ? result.error : MALFORMED_VIEW))
+        return
+      }
+      case '/git/worktrees':
+        okView(res, await service.worktrees(path), isWorktreeListView)
+        return
+      case '/git/worktree-add': {
+        const record = typeof payload === 'object' && payload !== null
+          ? payload as Record<string, unknown>
+          : {}
+        const name = record.name
+        const baseRef = record.baseRef
+        if (typeof name !== 'string' || name === ''
+          || (baseRef !== undefined && typeof baseRef !== 'string')) {
+          writeJson(res, 200, FAIL(BAD_REQUEST))
+          return
+        }
+        // The client names the worktree but never supplies its path: the
+        // service constructs the target under the managed home itself.
+        const result = await service.addWorktree(path, name, baseRef)
+        writeJson(res, 200, result.ok ? OK({ path: result.path, branch: result.branch, name: result.name }) : FAIL(isGitError(result.error) ? result.error : MALFORMED_VIEW))
+        return
+      }
+      case '/git/worktree-remove': {
+        const record = typeof payload === 'object' && payload !== null
+          ? payload as Record<string, unknown>
+          : {}
+        const worktreePath = record.worktreePath
+        if (typeof worktreePath !== 'string' || worktreePath === '') {
+          writeJson(res, 200, FAIL(BAD_REQUEST))
+          return
+        }
+        const result = await service.removeWorktree(path, worktreePath, {
+          force: record.force === true,
+          deleteBranch: record.deleteBranch === true,
+        })
+        writeJson(res, 200, result.ok ? OK({ removed: true }) : FAIL(isGitError(result.error) ? result.error : MALFORMED_VIEW))
         return
       }
       default:
@@ -289,7 +320,7 @@ export function registerGitRoutes(ctx: Context, service: GitService): () => void
   const sse = (req: IncomingMessage, res: ServerResponse): void => {
     // Reject unpaired non-loopback clients before the stream opens.
     if (!isGitAllowed(ctx, req)) {
-      forbidden(res)
+      writeJson(res, 403, { error: 'forbidden: loopback-only' })
       return
     }
     const url = new URL(req.url ?? '/', 'http://x')

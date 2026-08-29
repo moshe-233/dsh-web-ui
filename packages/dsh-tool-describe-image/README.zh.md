@@ -9,7 +9,7 @@
 
 本包由 deepseek-harness `packages/vision/tool-describe-image` 移植（镜像仓库
 [whitelonng/dsh-plugin-describe-image](https://github.com/whitelonng/dsh-plugin-describe-image)），
-按 dsh-web-ui 全家桶规范适配：仅官方 NPM SDK、host 侧插件配浏览器半部、设置区实时配置，不修改 DSH 源码。
+按 dsh-web 全家桶规范适配：仅官方 NPM SDK、host 侧插件配浏览器半部、设置区实时配置，不修改 DSH 源码。
 
 ## 能力
 
@@ -18,7 +18,7 @@
 | 三种输入 | 本地绝对路径、http(s) URL（拒绝重定向）、完整的 `[image attachment ...]` 注记，或拖拽/粘贴产生的完整自描述 Markdown 引用（`![图片](/describe-image/raw/sha256:...?ref=...)`）。把完整 Markdown 引用直接传给工具：其中序列化的不可变元数据可在 Host 重启后及 PTC 嵌套工具调用中解析已存图片；裸 id 只作为当前进程的兼容兜底 |
 | 直接发图 | 在纯文本会话里拖拽或粘贴图片，发送时被改写为自描述 describe-image 引用（`![图片](/describe-image/raw/sha256:...?ref=...)`），而不是模型读不了的图片块——图片在会话里正常渲染，模型经工具分析它。支持图片输入的模型（适配器声明 image 模态）会被自动识别：原图块直接交给模型本身的视觉，不再绕行 describe_image，且该会话的 `describe_image` 工具会被隐藏——多模态模型看不到、也无法调用它（包括 run_code 内的嵌套调用） |
 | 自定义指令 | `prompt` 参数携带你的精确指令（OCR、图表解读、UI 诊断、翻译…）；`defaultPrompt` 配置设置模型未传指令时的兜底文案 |
-| 实时配置卡 | 设置 → 插件配置 → Web UI 插件组 → 「图像理解」卡修改 `baseURL` / `apiStyle` / `model` / API key / 默认指令 / 各项上限（走设置服务），即时生效，无需重启 |
+| 实时配置卡 | 设置 → 插件配置 → Web 插件组 → 「图像理解」卡修改 `baseURL` / `apiStyle` / `model` / API key / 默认指令 / 各项上限（走设置服务），即时生效，无需重启 |
 | 连通测试与模型获取 | 模型字段带「获取模型」控件，模型字段有值时再出现「测试连通性」控件，两者未保存也可用。获取把草稿提交到 `POST /describe-image/models`，Host 侧按密钥解析链解析凭证、只回模型 id 列表；列出成功即端点可达且鉴权通过，模型字段随之切换为已获取模型的下拉选择。测试连通性用所选模型发一次最小补全（`max_tokens` 1），回报模型本身的往返延迟 |
 | 多协议 | `apiStyle: chat-completions`（默认）请求 `baseURL/chat/completions` 并读取 `message.content`，content 为空时回退 `reasoning_content`（推理模型如 Kimi K2.x 可能把全部输出预算花在思维链上——issue #637；调大 `maxOutputTokens` 或用 `model:off` 可避免）；`apiStyle: responses` 请求 `baseURL/responses`，使用 `input` / `max_output_tokens` 并读取 `output_text`，兼容只返回 SSE 流式响应的端点（自动解析 `text/event-stream`）；`apiStyle: anthropic-messages` 请求 `baseURL/v1/messages`（`x-api-key` 鉴权，Claude 风格端点如 OpenCode Go / 智谱 GLM / 月之暗面 Kimi），读取 `content[].text` |
 | 思考控制 | 模型 id 带可选后缀：`model:off` 禁用思考，`model:low` / `model:medium` / `model:high` 开启思考；不带后缀则不发送控制、沿用端点默认（MiMo-V2.5、DeepSeek V4 默认开启思考） |
@@ -35,8 +35,15 @@
   不会转发到部署配置之外的源。
 - 请求体携带 base64 图片但不携带密钥；不记录请求头与已解析凭证。
 - 仅接受 `http(s)` URL 与本地路径，其余 URL 协议一律拒绝。
+- 图片 URL 由模型提供：私网、回环、链路本地（云元数据）与保留地址在任何连接前即被
+  拒绝——字面 IP 依据规范化后的 URL 直接判定，域名则在逐个检查解析结果后判定，无法
+  解析的域名按失败关闭处理；拒绝文案不会回显 HTTP 状态码或主机内部信息。
+- 本地文件路径只在会话工作区（会话的规范化工作目录）内可读：`..` 穿越与符号链接无法
+  逃逸；未携带会话工作区的调用只能使用 URL 或附件引用。
 - attach 路由先校验 base64、magic bytes 与字节上限，再交给附件存储持久化；
   只有引用 JSON（文本）进入会话。
+- attach 与原图路由同受回环同源围栏（与模型探测路由同款）：原图读取回吐已存图片字节、
+  attach 上传写入本地附件存储，LAN 或跨站调用者在两者执行前即被拒之门外。
 - 响应体先按上限（`maxOutputTokens * 8 + 64 KiB`）截断再解析。
 - 模型探测的密钥留在 Host：浏览器侧只提交连接字段草稿、只接收模型 id 列表
   或延迟数字；获取只做一次 `GET` 模型列举，连通性测试只发一次 `max_tokens` 1
@@ -48,7 +55,7 @@
 
 ## 安装
 
-推荐直接安装全家桶聚合包 `@linxin666/dsh-web-ui-all`（一个包装齐全部功能插件与皮肤），或单独安装本插件：
+推荐直接安装全家桶聚合包 `@linxin666/dsh-web-all`（一个包装齐全部功能插件与皮肤），或单独安装本插件：
 
 ```sh
 # 推荐：直接从 npm 安装
@@ -70,6 +77,9 @@ dsh plugin --profile web add @linxin666/dsh-tool-describe-image@latest
 | `model` | —（必填） | 视觉模型 id，可带思考后缀（`:off` / `:low` / `:medium` / `:high`）。后缀在发往端点前剥除：`:off` 映射为 `thinking.type=disabled`（`chat-completions`）或 `reasoning.effort=none`（`responses`）；其余档位映射为 `enabled`，或原样作为 `reasoning.effort` 的值。不带后缀则不发送任何思考控制字段；`anthropic-messages` 协议不发送思考字段，保持端点自身默认 |
 | `apiKey` | — | 内联密钥；本地调试用。建议用 `!!js process.env.VISION_API_KEY` 从环境注入，勿写死明文 |
 | `apiKeyEnv` | `VISION_API_KEY` | 凭证引用（环境变量名）；空字符串禁用引用解析 |
+| `endpoints` | — | 多端点/模型候选列表，支持为每个端点单独配置 `baseURL`、`model`、`apiKey`、`apiKeyEnv`、`apiStyle`、`maxOutputTokens`、`enabled`（默认 `true`）与 `name`（issue #1234） |
+| `rotationMode` | `round-robin` | 多端点调度策略：`round-robin`（多次调用在各可用模型间依次循环轮询，平摊限流）或 `failover`（优先使用首选主端点，仅在失败时顺延备用端点） |
+| `retryNextOnFailure` | `true` | 当前端点请求失败（如 429 限流或服务故障）时，是否自动顺延尝试候选列表中的下一个端点 |
 | `defaultPrompt` | 见源码 | 调用未带 `prompt` 时的指令——按你的场景调优（OCR、UI 评审、翻译…） |
 | `maxBytes` | `10485760` | 图片字节上限（本地文件与下载一致） |
 | `maxOutputTokens` | `1024` | 输出 token 上限：`chat-completions` 与 `anthropic-messages` 发 `max_tokens`，`responses` 发 `max_output_tokens` |
@@ -86,6 +96,25 @@ dsh plugin --profile web add @linxin666/dsh-tool-describe-image@latest
     baseURL: https://dashscope.aliyuncs.com/compatible-mode/v1
     model: qwen-vl-max
     apiKey: !!js process.env.VISION_API_KEY
+```
+
+多模型循环与故障转移配置（智谱 + 阿里百炼自动轮询）：
+
+```yaml
+- id: describe-image
+  name: '@linxin666/dsh-tool-describe-image'
+  config:
+    rotationMode: round-robin
+    retryNextOnFailure: true
+    endpoints:
+      - name: 智谱 GLM-4V
+        baseURL: https://open.bigmodel.cn/api/paas/v4
+        model: glm-4v
+        apiKey: !!js process.env.ZHIPU_API_KEY
+      - name: 阿里百炼 Qwen-VL
+        baseURL: https://dashscope.aliyuncs.com/compatible-mode/v1
+        model: qwen-vl-max:off
+        apiKey: !!js process.env.QWEN_API_KEY
 ```
 
 只开放 Responses API 的端点设置 `apiStyle: responses`：
@@ -180,3 +209,7 @@ DeepSeek chat-completions 适配器（rc.8）在模型目录条目的 `inputModa
 - **版权**：原代码版权归原作者（deepseek-ai / whitelonng）所有，本仓库仅托管与维护，不主张版权；
   贡献移植部分由贡献者授权以全家桶许可证发布。
 - **许可证**：全家桶以 [Apache-2.0](../../LICENSE) 授权（见仓库根 LICENSE），本包 license 字段为 `Apache-2.0`。
+
+## 数据遥测
+
+浏览器半区每个 UTC 日向 dsh-market.com 发送一次匿名安装心跳：仅含一个 localStorage 随机 ID 与本包名，无其他数据。服务端只存储该 ID 的加盐哈希，不存 IP，且只暴露聚合计数。完整契约见 [docs/telemetry.md](../../docs/telemetry.md)。

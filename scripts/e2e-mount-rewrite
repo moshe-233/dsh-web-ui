@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Rewrite the packed dsh-web-ui-all tarball's dependency table for the
+ * Rewrite the packed dsh-web-all tarball's dependency table for the
  * e2e mount smoke (scripts/e2e-mount.sh).
  *
  * Modes:
@@ -58,7 +58,7 @@ function packWorkspace(pkgDir, outDir) {
   // win32: CreateProcess only appends .exe to bare names, so the pnpm.cmd
   // shim must be named explicitly (libuv runs .cmd via cmd.exe).
   const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
-  execFileSync(pnpm, ['pack', '--pack-destination', dest], { cwd: pkgDir, stdio: 'pipe' })
+  execFileSync(pnpm, ['pack', '--pack-destination', dest], { cwd: pkgDir, stdio: 'pipe', shell: process.platform === 'win32' })
   const names = fs.readdirSync(dest).filter(name => name.endsWith('.tgz'))
   if (names.length !== 1) {
     throw new Error('pnpm pack 未产出唯一 tarball（' + pkgDir + '）: ' + names.join(', '))

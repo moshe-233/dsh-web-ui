@@ -21,13 +21,13 @@ export interface SourceGroup {
 
 /** Source levels produced by filesystem scanning (registry sources map to the same set). */
 export const SOURCE_GROUPS: SourceGroup[] = [
-  { key: 'bundled', title: 'System bundled', hint: 'Skills shipped with DSH and its plugins' },
-  { key: 'project-dsh', title: 'Project skills (.dsh/skills)', hint: 'Current project only' },
-  { key: 'project-agents', title: 'Project skills (.agents/skills)', hint: 'Current project only' },
+  { key: 'bundled', title: 'System bundled', hint: 'Global skills shipped with DSH and its plugins' },
+  { key: 'project-dsh', title: 'Project skills (.dsh/skills)', hint: 'Located in the project directory, scoped to its workspace' },
+  { key: 'project-agents', title: 'Project skills (.agents/skills)', hint: 'Located in the project directory, scoped to its workspace' },
   { key: 'custom', title: 'Custom directories', hint: 'customSkillDirs config' },
-  { key: 'user-dsh', title: 'User skills (~/.dsh/skills)', hint: 'All projects on this machine' },
-  { key: 'user-agents', title: 'User skills (~/.agents/skills)', hint: 'All projects on this machine' },
-  { key: 'runtime', title: 'Runtime registered', hint: 'Registered in plugin code' },
+  { key: 'user-dsh', title: 'User skills (~/.dsh/skills)', hint: 'Global skills shared by all projects on this machine' },
+  { key: 'user-agents', title: 'User skills (~/.agents/skills)', hint: 'Global skills shared by all projects on this machine' },
+  { key: 'runtime', title: 'Runtime registered', hint: 'Skills registered at runtime by plugins' },
 ]
 
 /** Registry source -> display level mapping (unlisted sources fall into "other"). */
@@ -261,25 +261,30 @@ export async function collectSkills(options: CollectOptions): Promise<CollectRes
 
   // Registry supplement: same-name skills get whenToUse / invocation flags
   // filled in; registry-only skills (bundled / runtime) join as-is.
+  // Query the registry for primary cwd and any other active project roots so
+  // project-level providers are captured.
+  const snapshotCwds = new Set<string>([cwd, ...roots])
   let complete = true
-  try {
-    const snapshot = await registry.snapshot({ cwd })
-    complete = snapshot.complete
-    for (const skill of snapshot.skills) {
-      const existing = byName.get(skill.name)
-      const serialized = serializeRegistry(skill)
-      if (existing === undefined) {
-        byName.set(skill.name, serialized)
-      } else {
-        if (serialized.whenToUse !== undefined) existing.whenToUse = serialized.whenToUse
-        if (serialized.provider !== undefined) existing.provider = serialized.provider
-        existing.modelInvocable = serialized.modelInvocable
-        existing.userInvocable = serialized.userInvocable
+  for (const snapshotCwd of snapshotCwds) {
+    try {
+      const snapshot = await registry.snapshot({ cwd: snapshotCwd })
+      if (snapshot.complete !== true) complete = false
+      for (const skill of snapshot.skills) {
+        const existing = byName.get(skill.name)
+        const serialized = serializeRegistry(skill)
+        if (existing === undefined) {
+          byName.set(skill.name, serialized)
+        } else {
+          if (serialized.whenToUse !== undefined) existing.whenToUse = serialized.whenToUse
+          if (serialized.provider !== undefined) existing.provider = serialized.provider
+          existing.modelInvocable = serialized.modelInvocable
+          existing.userInvocable = serialized.userInvocable
+        }
       }
+    } catch {
+      // Registry unavailable: the filesystem result still stands.
+      complete = false
     }
-  } catch {
-    // Registry unavailable: the filesystem result still stands.
-    complete = false
   }
   return { skills: [...byName.values()], complete }
 }

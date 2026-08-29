@@ -18,8 +18,11 @@
  * @module @linxin666/dsh-tool-describe-image/client
  */
 
-import type { ClientContext, SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
+// Type-only: pulls the ctx.slots merge (the renderer owns the slot registry since 0.1.2).
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -28,6 +31,7 @@ import { createImageCapabilityChecker } from './capability.ts'
 import { installConversationImagePreview, type ConversationImagePreview } from './preview.ts'
 import { DescribeImageSettingsCard, DescribeImageSettingsCardController, type DescribeImageSettings } from './DescribeImageSettingsCard.tsx'
 import { dictionaries, setLanguage, type DescribeImageClientKey } from './locales.ts'
+import { reportDailyHeartbeat } from './telemetry.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -37,7 +41,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
   interface SlotMap {
     /**
-     * One family plugin card inside the Web UI Plugins group. Spelled here
+     * One family plugin card inside the Web Plugins group. Spelled here
      * with the same shape so this package can register without depending on
      * the sibling web-ui-settings package.
      */
@@ -54,7 +58,7 @@ export interface SettingsPluginItemOwnerProps {
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /**
-     * Optional rc.6 compatibility binder provided by dsh-web-ui-settings;
+     * Optional rc.6 compatibility binder provided by dsh-web-settings;
      * absent when that group plugin is not installed, so callers fall back to
      * the official settings scope.
      */
@@ -70,7 +74,17 @@ export const inject = ['slots', 'conversation', 'settingsScope', 'locale']
 
 /** Apply the browser half. */
 export function apply(ctx: ClientContext): void {
-  ctx.effect(() => ctx.locale.register(NS, dictionaries), 'dsh-tool-describe-image: dictionaries')
+  // Anonymous install heartbeat (docs/telemetry.md): one beat per browser per
+  // UTC day, package name only, silent failure.
+  reportDailyHeartbeat([{ name: '@linxin666/dsh-tool-describe-image' }])
+
+  ctx.effect(() => {
+    try {
+      return ctx.locale.register(NS, dictionaries)
+    } catch {
+      return () => {}
+    }
+  }, 'dsh-tool-describe-image: dictionaries')
   ctx.effect(() => {
     // Mirror the shell language into the module-level dictionary switch.
     const sync = (): void => {
@@ -131,16 +145,20 @@ export function apply(ctx: ClientContext): void {
       unsubscribeSettings = settingsScope.subscribe(() => previewRef?.refresh())
       const settingsCard = new DescribeImageSettingsCardController(settingsScope)
       slots.inject('web-ui.plugin.item', () => {
-        const unregister = slots.register({
-          name: 'web-ui.plugin.item',
-          id: 'describe-image',
-          order: 115,
-          locale: NS,
-          inject: () => settingsCard.inject(),
-        }, DescribeImageSettingsCard)
-        return () => {
-          settingsCard.dispose()
-          unregister()
+        try {
+          const unregister = slots.register({
+            name: 'web-ui.plugin.item',
+            id: 'describe-image',
+            order: 115,
+            locale: NS,
+            inject: () => settingsCard.inject(),
+          }, DescribeImageSettingsCard)
+          return () => {
+            settingsCard.dispose()
+            unregister()
+          }
+        } catch {
+          return () => {}
         }
       })
     })

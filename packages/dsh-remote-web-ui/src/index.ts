@@ -16,6 +16,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from 'schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-commands'
 import { DEFAULT_IDLE_EXPIRE_MS, PairingService, type PairingConfig } from './pairing.ts'
 import { dshHome } from './dsh-home.ts'
 import { isPairedDeviceRequest, makeGateListener } from './gate.ts'
@@ -23,20 +25,27 @@ import { RemoteWebUiPairing } from './pairing-access.ts'
 import { isTrustedApiRequest, makeRoutes } from './routes.ts'
 import { makeMobileRoutes } from './mobile-routes.ts'
 import { makeMobileApiRoutes } from './mobile-api.ts'
+import { PendingTracker } from './mobile-pending.ts'
+import { makePairedModelCatalogRoutes } from './paired-model-catalog.ts'
 import { makeRemoteApiRoutes, makeRemoteApiUpgradeRoutes } from './remote-api.ts'
-import { anyExposed, claimPostureKey, postureTargets, probePosture, releasePostureKey } from './posture.ts'
+import { claimPostureKey, postureTargets, probePosture, releasePostureKey } from './posture.ts'
 import { lanIPv4Addresses } from './lan.ts'
 import { TunnelManager, type TunnelInfo } from './tunnel.ts'
 import {
   checkUpdates,
+  fetchGitHubReleaseNotes,
   fetchLatestVersion,
+  RELEASE_NOTES_CACHE_TTL_MS,
   resolveAnchorManifest,
   resolveUpdateTarget,
   runUpdateVerified,
+  type UpdateReleaseNotes,
   type UpdateRunResult,
 } from './update.ts'
 import { makeUpdateRoutes } from './update-routes.ts'
 import { mountOnce } from './mount-once.ts'
+import { REMOTE_CHANNEL_BOOT_SCRIPT } from './remote-channel-boot.ts'
+import { UUID_POLYFILL_SCRIPT } from './uuid-polyfill.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Events {
@@ -59,7 +68,7 @@ declare module '@deepseek-ai/cordis' {
 export const name = 'remote-web-ui'
 
 /** Services required before the pairing surfaces can mount. */
-export const inject = ['webServer', 'apiProxy']
+export const inject = ['webServer', 'typertGateway', 'workspaceRegistry', 'commands', 'agents']
 
 /**
  * Settings namespace of the remote-control capability — the section the web
@@ -284,13 +293,15 @@ function applyImpl(ctx: Context, config?: Config): void {
   let disposeRoutes: (() => void) | undefined
   let disposeSweep: (() => void) | undefined
   // The phone's data channel: pairing routes + the /m page + the /m/api
-  // proxy (which needs the host ApiProxy service; the plugin injects it).
-  const apiProxy = ctx.get('apiProxy')
-  if (apiProxy === undefined) {
-    console.warn('remote-web-ui: apiProxy service unavailable — the mobile data channel is disabled')
+  // gateway proxy (which needs the typertGateway and workspaceRegistry host
+  // services; the plugin injects both).
+  const gateway = ctx.get('typertGateway') as import('./host-gateway.ts').TypertGatewayFace | undefined
+  const workspaceRegistry = ctx.get('workspaceRegistry') as import('./host-gateway.ts').WorkspaceRegistryFace | undefined
+  if (gateway === undefined || workspaceRegistry === undefined) {
+    console.warn('remote-web-ui: typertGateway/workspaceRegistry service unavailable — the mobile data channel is disabled')
   }
   // ── remote update ────────────────────────────────────────────────────────
-  // The dsh-web-ui self-update surface: probe the npm registry for family
+  // The dsh-web self-update surface: probe the npm registry for family
   // releases and run `pnpm update --latest` in the owning profile. Resolutions
   // anchor on the host process's own module graph, so the update always
   // targets the profile the running web GUI was booted from. The anchor path
@@ -305,6 +316,15 @@ function applyImpl(ctx: Context, config?: Config): void {
       return undefined
     }
   })
+
+  const releaseNotesCache = new Map<string, { at: number; notes?: UpdateReleaseNotes }>()
+  const fetchReleaseNotesCached = async (version: string): Promise<UpdateReleaseNotes | undefined> => {
+    const cached = releaseNotesCache.get(version)
+    if (cached !== undefined && Date.now() - cached.at < RELEASE_NOTES_CACHE_TTL_MS) return cached.notes
+    const notes = await fetchGitHubReleaseNotes(version, fetch)
+    releaseNotesCache.set(version, { at: Date.now(), notes })
+    return notes
+  }
   const updateRoutes = makeUpdateRoutes({
     // Control endpoints are host-surface only: a LAN/phone origin must never
     // trigger a real install on this machine.
@@ -319,6 +339,7 @@ function applyImpl(ctx: Context, config?: Config): void {
         }
       },
       fetchLatest: name => fetchLatestVersion(name, fetch),
+      fetchReleaseNotes: fetchReleaseNotesCached,
     }),
     run: async (): Promise<UpdateRunResult> => {
       const target = resolveUpdateTarget({ anchorManifestPath: resolveAnchorPath() })
@@ -328,7 +349,7 @@ function applyImpl(ctx: Context, config?: Config): void {
           ok: false,
           exitCode: null,
           output: '',
-          error: code === 'not-found' ? 'dsh-web-ui aggregate not installed' : 'local link install — update unavailable',
+          error: code === 'not-found' ? 'dsh-web aggregate not installed' : 'local link install — update unavailable',
           errorCode: code,
         }
       }
@@ -348,6 +369,7 @@ function applyImpl(ctx: Context, config?: Config): void {
             }
           },
           fetchLatest: name => fetchLatestVersion(name, fetch),
+          fetchReleaseNotes: fetchReleaseNotesCached,
         },
       })
     },
@@ -355,9 +377,27 @@ function applyImpl(ctx: Context, config?: Config): void {
   const routes = [
     ...makeRoutes({ service, lanAddresses, requirePairingForLan: () => resolve().requirePairingForLan }),
     ...makeMobileRoutes(),
-    ...(apiProxy !== undefined
-      ? makeMobileApiRoutes({ service, apiProxy, mobileEnterToSend: () => resolve().mobileEnterToSend })
+    ...(gateway !== undefined && workspaceRegistry !== undefined
+      ? makeMobileApiRoutes({
+          service,
+          gateway,
+          workspaceRegistry,
+          pendingTracker: new PendingTracker(),
+          mobileEnterToSend: () => resolve().mobileEnterToSend,
+          commandDispatcher: ctx.commands !== undefined && ctx.agents !== undefined
+            ? {
+                async execute(sessionId, line, signal) {
+                  const agent = ctx.agents.get(sessionId as never)
+                  if (agent === undefined) return { error: 'session-not-found' as const }
+                  const execution = await ctx.commands.execute(agent, line, [], signal)
+                  if (execution === undefined) return { error: 'unknown-command' as const }
+                  return { ok: true as const, result: execution.result }
+                },
+              }
+            : undefined,
+        })
       : []),
+    ...(gateway !== undefined ? makePairedModelCatalogRoutes({ service, gateway, lanAddresses }) : []),
     // The remote desktop channel: policy-gated `/remote` prefix that
     // re-issues fenced paths to loopback (see remote-api.ts). The live
     // requirePairingForLan is re-read per request, same as the gate listener
@@ -419,12 +459,18 @@ function applyImpl(ctx: Context, config?: Config): void {
   const initialPostureTimer = nodeSetTimeout(() => { runPostureProbe() }, 5_000)
   initialPostureTimer.unref()
   ctx.effect(() => () => { clearTimeout(initialPostureTimer) }, 'remote-web-ui: posture probe boot')
-  // Sibling plugins (aionui-panel, …) look this up by name. Absent when this
+  // Sibling plugins (dsh-better-sidebar, …) look this up by name. Absent when this
   // plugin is not installed; stop() / enabled=false still refuse cookies.
   new RemoteWebUiPairing(ctx, (request) => {
     if (!resolve().enabled) return false
     return isPairedDeviceRequest(service, request)
   })
+
+  if (lanAddresses.length > 0) {
+    const urls = lanAddresses.map(ip => `http://${ip}:${String(ctx.webServer.port)}/m/`).join(' , ')
+    console.log(`remote-web-ui: mobile UI reachable on LAN at ${urls}`)
+  }
+
   const sync = (): void => {
     const value = resolve()
     service.config = pairingConfigOf(value)
@@ -482,6 +528,26 @@ function applyImpl(ctx: Context, config?: Config): void {
     // re-probe unless the target set is unchanged.
     runPostureProbe()
   }
+  // Inject the crypto.randomUUID polyfill before any other script runs, so that
+  // the main bundle doesn't crash on non-secure contexts (LAN HTTP)
+  ctx.effect(() => ctx.on('webserver/index-inject', (table) => {
+    table.push({ kind: 'script', placement: 'head', text: UUID_POLYFILL_SCRIPT })
+  }), 'remote-web-ui: uuid polyfill')
+
+  // Issue #987: the browser-half channel patch installs at this plugin's
+  // boot entry, but dsh-client-connection boots earlier and opens its event
+  // streams unrewritten — on a non-loopback origin the SDK fence rejects
+  // them and the workspace list never loads. Contribute the rewrite as a
+  // parse-time head script so it is active before ANY boot entry runs; the
+  // client apply adopts the installed seat instead of patching twice. The
+  // row follows the live steady-state decision (enabled + pairing gate); the
+  // script itself skips loopback origins.
+  ctx.effect(() => ctx.on('webserver/index-inject', (table) => {
+    const value = resolve()
+    if (!value.enabled || !value.requirePairingForLan) return
+    table.push({ kind: 'script', placement: 'head', text: REMOTE_CHANNEL_BOOT_SCRIPT })
+  }), 'remote-web-ui: remote channel boot patch')
+
   installSettingsSection(ctx, REMOTE_WEB_UI_SETTINGS_NAMESPACE, Config, config ?? {}, {
     setSource: (source) => {
       current = source
